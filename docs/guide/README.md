@@ -9,14 +9,14 @@
 
 A governed control plane for software composition analysis, recon, evidence, and reporting.
 
-[Landing page](https://kkloudtarus.github.io/synapse-ce/) · [GitHub](https://github.com/KKloudTarus/synapse-ce) · [License](../../LICENSE)
+[Landing page](https://synapse.kkloudtarus.net/) · [GitHub](https://github.com/KKloudTarus/synapse-ce) · [License](../../LICENSE)
 
 </div>
 
 ---
 
 Welcome to the Synapse documentation. These guides cover everything from a first scan to a
-production deployment. If you prefer a visual tour, the [landing page](https://kkloudtarus.github.io/synapse-ce/)
+production deployment. If you prefer a visual tour, the [landing page](https://synapse.kkloudtarus.net/)
 has screenshots of the current build.
 
 ## Contents

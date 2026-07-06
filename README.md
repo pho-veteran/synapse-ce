@@ -13,9 +13,9 @@ deterministic reports.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-6d5bff)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8)](go.mod)
-[![Docs](https://img.shields.io/badge/docs-live-6d5bff)](https://kkloudtarus.github.io/synapse-ce/)
+[![Docs](https://img.shields.io/badge/docs-live-6d5bff)](https://synapse.kkloudtarus.net/)
 
-[Landing page](https://kkloudtarus.github.io/synapse-ce/) · [Documentation](docs/guide/README.md) · [Quickstart](#quickstart) · [Features](#features) · [Configuration](docs/guide/configuration.md)
+[Landing page](https://synapse.kkloudtarus.net/) · [Documentation](docs/guide/README.md) · [Quickstart](#quickstart) · [Features](#features) · [Configuration](docs/guide/configuration.md)
 
 </div>
 
@@ -67,7 +67,7 @@ approves anything intrusive.
 - **Bounded AI analysis** (optional): the agent proposes, a distinct verifier or a human
   confirms. No model ever sits in the report path.
 
-See the full walkthrough with screenshots on the [documentation site](https://kkloudtarus.github.io/synapse-ce/#screens).
+See the full walkthrough with screenshots on the [documentation site](https://synapse.kkloudtarus.net/#screens).
 
 ## Quickstart
 
