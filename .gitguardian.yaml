@@ -1,0 +1,15 @@
+# GitGuardian configuration.
+# The values below are LOCAL-DEV placeholders and TEST FIXTURES, not real credentials.
+# They are intentionally in the repo (the local docker dev stack and unit tests need them)
+# and were never used for any real service, so there is nothing to rotate.
+version: 2
+secret:
+  ignored-matches:
+    - name: "Local dev docker stack password (Postgres/MinIO); dev-only default, not a real secret"
+      match: synapse-secret
+    - name: "Redactor unit-test fixture (fake secret used to prove redaction)"
+      match: SuperSecret123
+    - name: "Redactor unit-test fixture (fake token)"
+      match: S3CR3T_TOKEN_DEADBEEF
+    - name: "Untrusted-input unit-test fixture (fake token)"
+      match: supersecrettoken1234567
