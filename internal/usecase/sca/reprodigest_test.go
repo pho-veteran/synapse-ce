@@ -97,7 +97,7 @@ func TestReproDigestNilAndEmptyStable(t *testing.T) {
 	if ReproDigest(nil) != "" {
 		t.Error("nil result → empty digest")
 	}
-	if ReproDigest(&ScanResult{}) != ReproDigest(&ScanResult{}) {
+	if d1, d2 := ReproDigest(&ScanResult{}), ReproDigest(&ScanResult{}); d1 != d2 {
 		t.Error("empty result digest must be stable")
 	}
 }

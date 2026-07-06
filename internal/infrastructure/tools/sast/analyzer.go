@@ -119,7 +119,7 @@ func readSourceLines(path string) []string {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Binary sniff: a NUL byte in the first chunk ⇒ not source, skip.
 	head := make([]byte, 512)

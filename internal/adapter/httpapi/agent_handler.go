@@ -334,7 +334,7 @@ func (rt *Router) streamAgentSession(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			for i := after; i < len(msgs); i++ {
 				payload, _ := json.Marshal(msgs[i])
-				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", i+1, payload)
+				_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", i+1, payload)
 			}
 			if len(msgs) > after {
 				after = len(msgs)
@@ -343,7 +343,7 @@ func (rt *Router) streamAgentSession(w http.ResponseWriter, r *http.Request) {
 		}
 		cur, err := rt.agent.sessions.GetSession(ctx, sess.ID)
 		if err == nil && cur.Status.Terminal() {
-			fmt.Fprintf(w, "id: %d\nevent: done\ndata: {\"status\":%q}\n\n", after, cur.Status)
+			_, _ = fmt.Fprintf(w, "id: %d\nevent: done\ndata: {\"status\":%q}\n\n", after, cur.Status)
 			flusher.Flush()
 			return
 		}

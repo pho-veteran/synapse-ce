@@ -111,10 +111,10 @@ func (rt *Router) streamReconLogs(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if e.Done {
-				fmt.Fprintf(w, "id: %d\nevent: done\ndata: {}\n\n", e.ID)
+				_, _ = fmt.Fprintf(w, "id: %d\nevent: done\ndata: {}\n\n", e.ID)
 			} else {
 				payload, _ := json.Marshal(e)
-				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", e.ID, payload)
+				_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", e.ID, payload)
 			}
 			flusher.Flush()
 		}

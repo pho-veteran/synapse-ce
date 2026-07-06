@@ -306,11 +306,9 @@ func (o *Orchestrator) loop(ctx context.Context, sess agent.Session) (agent.Sess
 			// No proposal: the model produced its final answer — the goal is met (or it gave up).
 			final := redact.String(resp.Content, nil) // strip any URL-embedded creds from prose
 			asst := agent.Message{Role: agent.RoleAssistant, Content: final}
-			transcript = append(transcript, asst)
 			if err := o.sessions.AppendMessage(ctx, sess.ID, seq, asst); err != nil {
 				return o.fail(ctx, sess, fmt.Errorf("persist turn: %w", err))
 			}
-			seq++
 			return o.finish(ctx, sess, agent.StatusSucceeded, final)
 		}
 

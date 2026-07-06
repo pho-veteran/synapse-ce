@@ -21,7 +21,7 @@ func TestComputeHashLinksPrevious(t *testing.T) {
 	if a == ComputeHash(withPrev) {
 		t.Error("hash must incorporate the previous hash (chain link)")
 	}
-	if ComputeHash(base) != ComputeHash(base) {
+	if h1, h2 := ComputeHash(base), ComputeHash(base); h1 != h2 {
 		t.Error("hash must be deterministic for identical inputs")
 	}
 }
