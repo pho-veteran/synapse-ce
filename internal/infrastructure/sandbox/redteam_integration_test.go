@@ -140,7 +140,7 @@ func TestRedTeamIsolated(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	t.Logf("\n========== RED-TEAM (ISOLATED) ==========\n%s\n=========================================", res.Stdout)
-	if res.Stderr != nil && len(res.Stderr) > 0 {
+	if len(res.Stderr) > 0 {
 		t.Logf("stderr: %s", res.Stderr)
 	}
 }
