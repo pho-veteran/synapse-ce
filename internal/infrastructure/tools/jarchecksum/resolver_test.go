@@ -107,6 +107,41 @@ func TestResolveSkipsSymlink(t *testing.T) {
 	}
 }
 
+func TestFileSHA1RejectsFinalSymlink(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "target.jar")
+	writeFile(t, target, []byte("out of tree"))
+	link := filepath.Join(t.TempDir(), "link.jar")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	f, err := openFileNoFollow(link)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("openFileNoFollow followed a final-component symlink")
+	}
+	if got, ok := fileSHA1(link); ok || got != "" {
+		t.Fatalf("fileSHA1 accepted a final-component symlink: ok=%v, digest=%q", ok, got)
+	}
+}
+
+func TestFileSHA1RejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.jar")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxJARBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := fileSHA1(path); ok || got != "" {
+		t.Fatalf("fileSHA1 accepted an oversized file: ok=%v, digest=%q", ok, got)
+	}
+}
+
 func TestResolveNoJARComponentsNoWalk(t *testing.T) {
 	ws := t.TempDir()
 	comps := []sbom.Component{{Name: "npmpkg", Version: "1.0", Location: "/pkg", PURL: "pkg:npm/pkg@1.0"}}

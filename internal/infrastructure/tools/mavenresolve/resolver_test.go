@@ -82,9 +82,13 @@ func TestArgsLocalRepo(t *testing.T) {
 	if hasArg(base.args("/x"), "-Dmaven.repo.local") {
 		t.Error("no localRepo configured ⇒ no -Dmaven.repo.local flag")
 	}
-	withRepo := New("mvn").WithLocalRepo("/cache/.m2")
-	if !contains(withRepo.args("/x"), "-Dmaven.repo.local=/cache/.m2") {
-		t.Errorf("localRepo set ⇒ flag expected, got %v", withRepo.args("/x"))
+	localRepo, err := filepath.Abs(filepath.FromSlash("/cache/.m2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withRepo := New("mvn").WithLocalRepo(localRepo)
+	if !contains(withRepo.args(filepath.FromSlash("/x")), "-Dmaven.repo.local="+localRepo) {
+		t.Errorf("localRepo set ⇒ flag expected, got %v", withRepo.args(filepath.FromSlash("/x")))
 	}
 	// goal + pom flag always present
 	a := base.args("/proj")
@@ -334,8 +338,8 @@ func TestResolvePartialFailureKeepsResolvedPlusError(t *testing.T) {
 	mkpom(t, filepath.Join(dir, "svcB"))
 	depList := "[INFO]    org.apache.commons:commons-lang3:jar:3.10:compile\n[INFO] BUILD SUCCESS\n"
 	r := New("mvn").WithRunner(fakeRunner{byArgSubstr: map[string]ports.ToolResult{
-		"svcA/pom.xml": {Stdout: []byte(depList)},             // svcA resolves
-		"svcB/pom.xml": {ExitCode: 1, Stderr: []byte("boom")}, // svcB fails
+		filepath.Join("svcA", "pom.xml"): {Stdout: []byte(depList)},             // svcA resolves
+		filepath.Join("svcB", "pom.xml"): {ExitCode: 1, Stderr: []byte("boom")}, // svcB fails
 	}})
 
 	comps, err := r.Resolve(context.Background(), dir)
