@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -131,19 +130,23 @@ func hashWorkspaceJARs(ctx context.Context, wsDir string) (byName map[string]str
 
 // fileSHA1 streams a SHA-1 over the file, refusing an over-large file. Returns "" on any error.
 func fileSHA1(path string) (string, bool) {
+	// This is only an early rejection. openFileNoFollow and the opened-handle Stat below are authoritative.
 	fi, err := os.Lstat(path)
 	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxJARBytes {
 		return "", false
 	}
-	// O_NOFOLLOW closes the Lstat->Open TOCTOU: if the regular file were swapped for a symlink between the
-	// stat above and this open, the open fails rather than following the link out of the untrusted workspace.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // bounded workspace walk, regular-file re-verified, O_NOFOLLOW-guarded
+	f, err := openFileNoFollow(path)
 	if err != nil {
 		return "", false
 	}
 	defer func() { _ = f.Close() }()
+	fi, err = f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxJARBytes {
+		return "", false
+	}
 	h := sha1.New() //nolint:gosec // Maven artifact identity, not a security hash
-	if _, err := io.Copy(h, io.LimitReader(f, maxJARBytes)); err != nil {
+	n, err := io.Copy(h, io.LimitReader(f, maxJARBytes+1))
+	if err != nil || n > maxJARBytes {
 		return "", false
 	}
 	return hex.EncodeToString(h.Sum(nil)), true
