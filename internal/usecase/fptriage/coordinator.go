@@ -26,13 +26,10 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 )
 
-// SourceReader returns a small source excerpt around file:line (1-based), radius lines each side. The
-// workspace it reads from is Synapse-controlled (a trusted-local dir or a sandbox-acquired tree), so
-// this is a bounded read, not a path handed to a tool. An error (missing file, binary) is non-fatal:
-// the coordinator critiques on the finding metadata alone.
-type SourceReader interface {
-	Snippet(file string, line, radius int) (string, error)
-}
+// SourceReader is the source-excerpt reader the coordinator uses for context (an alias for the shared
+// port, so the concrete fs reader lives in infrastructure, not here). An error is non-fatal: the
+// coordinator critiques on finding metadata alone.
+type SourceReader = ports.SourceSnippetReader
 
 // Critique is the model's per-finding verdict. Err is set when the (proposer) model could not be
 // consulted (timeout, transport, or an unparseable/invalid reply); such a critique is treated as
@@ -135,6 +132,17 @@ func (c *Coordinator) Assess(ctx context.Context, candidates []finding.Finding, 
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// Make the best-effort guarantee unconditional: a panic in one critique becomes that
+			// finding's Err (it then gates normally), never taking down the scan pipeline.
+			defer func() {
+				if r := recover(); r != nil {
+					out[i] = Critique{
+						FindingID: string(candidates[i].ID),
+						DedupKey:  candidates[i].DedupKey,
+						Err:       fmt.Errorf("critique panicked: %v", r),
+					}
+				}
+			}()
 			out[i] = c.assessOne(ctx, candidates[i], src)
 		}(i)
 	}
@@ -151,7 +159,7 @@ func (c *Coordinator) assessOne(ctx context.Context, f finding.Finding, src Sour
 	snippet := ""
 	if src != nil {
 		if file, line, ok := locationOf(f); ok {
-			if s, err := src.Snippet(file, line, c.radius); err == nil {
+			if s, err := src.Snippet(ctx, file, line, c.radius); err == nil {
 				snippet = s
 			}
 		}
