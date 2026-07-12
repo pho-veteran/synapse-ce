@@ -88,8 +88,8 @@ func TestCompileDomainsDeferredToResolution(t *testing.T) {
 	if !slices.Contains(p.AllowDomains, "example.com") {
 		t.Errorf("domain must be canonicalized + deferred for resolution: %v", p.AllowDomains)
 	}
-	if !slices.Contains(p.AllowDomains, "app.example.com") {
-		t.Errorf("a URL hostname must be deferred for resolution: %v", p.AllowDomains)
+	if len(p.AllowDomainRules) != 1 || p.AllowDomainRules[0].Host != "app.example.com" || !slices.Contains(p.AllowDomainRules[0].Ports, 443) {
+		t.Errorf("a URL hostname must be deferred with its effective port: %+v", p.AllowDomainRules)
 	}
 	if !slices.Contains(p.DenyDomains, "secret.example.com") {
 		t.Errorf("out-of-scope domain must be a deny-domain: %v", p.DenyDomains)
@@ -97,6 +97,19 @@ func TestCompileDomainsDeferredToResolution(t *testing.T) {
 	// Domains must NOT become a hostname-string rule (only resolved IPs become rules).
 	if len(p.Rules) != 0 {
 		t.Errorf("domains must not compile to address rules pre-resolution: %+v", p.Rules)
+	}
+}
+
+func TestCompileURLDomainPreservesEffectivePort(t *testing.T) {
+	p := Compile(engagement.Scope{InScope: []engagement.Target{
+		target(engagement.TargetURL, "https://API.Example.COM./admin"),
+		target(engagement.TargetURL, "http://api.example.com:8080/health"),
+	}})
+	if got, want := p.AllowDomainRules[0], (ports.DomainRule{Host: "api.example.com", Ports: []uint16{443}}); !slices.Equal(got.Ports, want.Ports) || got.Host != want.Host {
+		t.Errorf("first URL rule = %+v, want %+v", got, want)
+	}
+	if got, want := p.AllowDomainRules[1], (ports.DomainRule{Host: "api.example.com", Ports: []uint16{8080}}); !slices.Equal(got.Ports, want.Ports) || got.Host != want.Host {
+		t.Errorf("second URL rule = %+v, want %+v", got, want)
 	}
 }
 

@@ -13,8 +13,6 @@ package egress
 
 import (
 	"net/netip"
-	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/engagement"
@@ -57,17 +55,18 @@ func addTarget(p *ports.EgressPolicy, allow bool, t engagement.Target) {
 		if host == "" {
 			return
 		}
-		var portList []uint16
-		if port != 0 {
-			portList = []uint16{port}
-		}
+		portList := []uint16{port}
 		if a, err := netip.ParseAddr(host); err == nil {
 			p.Rules = append(p.Rules, ports.EgressRule{Allow: allow, Net: hostPrefix(a), Ports: portList})
 			return
 		}
-		addDomain(p, allow, host) // a URL with a hostname → resolve at run start
+		addDomainRule(p, allow, host, portList) // preserve URL scheme/effective port until resolution
 	case engagement.TargetDomain:
-		addDomain(p, allow, normalizeHost(v))
+		host, err := engagement.NormalizeDomainPattern(v)
+		if err != nil {
+			return
+		}
+		addDomain(p, allow, host)
 	}
 }
 
@@ -82,6 +81,18 @@ func addDomain(p *ports.EgressPolicy, allow bool, host string) {
 	}
 }
 
+func addDomainRule(p *ports.EgressPolicy, allow bool, host string, portList []uint16) {
+	if host == "" {
+		return
+	}
+	rule := ports.DomainRule{Host: host, Ports: portList}
+	if allow {
+		p.AllowDomainRules = append(p.AllowDomainRules, rule)
+	} else {
+		p.DenyDomainRules = append(p.DenyDomainRules, rule)
+	}
+}
+
 // hostPrefix returns the single-host prefix for an address (/32 v4, /128 v6). It does
 // NOT unmap an IPv4-mapped IPv6 – matching the scope matcher's family-strict stance
 // (scope.go addrOf), so a mapped form fails closed (a v6 /128 won't match v4 packets)
@@ -90,37 +101,12 @@ func hostPrefix(a netip.Addr) netip.Prefix {
 	return netip.PrefixFrom(a, a.BitLen())
 }
 
-// urlHostPort extracts the lowercased host + port from a URL value; port 0 means the
-// scheme default (80/443) was implied – callers treat 0 as "the URL's default port".
+// urlHostPort extracts the canonical host and effective port from an HTTP(S)
+// URL. NormalizeURL expands an omitted port to the scheme default.
 func urlHostPort(value string) (host string, port uint16) {
-	value = strings.TrimSpace(value)
-	if !strings.Contains(value, "://") {
-		value = "//" + value // let url.Parse treat a bare host[:port] as the host
-	}
-	u, err := url.Parse(value)
-	if err != nil || u.Host == "" {
+	identity, err := engagement.NormalizeURL(value)
+	if err != nil {
 		return "", 0
 	}
-	host = normalizeHost(u.Hostname())
-	if ps := u.Port(); ps != "" {
-		if n, err := strconv.Atoi(ps); err == nil && n > 0 && n <= 65535 {
-			port = uint16(n)
-		}
-	} else {
-		switch strings.ToLower(u.Scheme) {
-		case "https":
-			port = 443
-		case "http":
-			port = 80
-		}
-	}
-	return host, port
-}
-
-// normalizeHost lowercases + trims a host and strips a single trailing dot (FQDN root),
-// so matching is canonical (defeats the trailing-dot / case smuggling class).
-func normalizeHost(h string) string {
-	h = strings.TrimSpace(strings.ToLower(h))
-	h = strings.TrimSuffix(h, ".")
-	return h
+	return identity.Host, identity.Port
 }
