@@ -85,7 +85,7 @@ func (s *Service) buildContainmentProfile(tool ports.ReconTool, egress *ports.Eg
 				p.EgressAllowRules++
 			}
 		}
-		p.EgressAllowDomains = len(egress.AllowDomains)
+		p.EgressAllowDomains = len(egress.AllowDomains) + len(egress.AllowDomainRules)
 	}
 	return p
 }

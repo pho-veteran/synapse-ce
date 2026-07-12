@@ -40,42 +40,114 @@ func (t Target) Validate() error {
 	return err
 }
 
-// Allows reports whether a raw target value is permitted by this scope. It is a
-// convenience for value-only callers (SCA repo/path/URL targets): the value is
-// matched exactly, plus host-centric against any host/CIDR/wildcard scope entry.
-// Out-of-scope matches always win. Prefer AllowsTarget for kind-aware requests.
+// Allows infers the request kind and reports whether a raw target value is
+// permitted. It preserves kind-aware repository containment and network matching;
+// callers that already know the kind should use AllowsTarget directly.
 func (s Scope) Allows(value string) bool {
 	return s.AllowsTarget(Target{Kind: InferTargetKind(value), Value: value})
 }
 
-// AllowsTarget reports whether the requested target is permitted (host-centric,
-// CIDR/wildcard-aware). Matching is value-exact first (preserves SCA repo/image
-// semantics), then kind-aware against each scope entry. A URL scope authorizes
-// its exact canonical scheme, host, and effective port; use a domain scope for
-// an intentionally host-wide authorization. Out-of-scope always wins over
-// in-scope (fail closed). Enforced server-side before any tool runs.
+// AllowsTarget reports whether the requested target is permitted. In-scope URL
+// entries authorize only their canonical scheme, host, and effective port. An
+// out-of-scope URL is intentionally broader: it denies its host for every request
+// kind, scheme, and port. Out-of-scope always wins, and an invalid deny entry makes
+// the scope unenforceable and therefore denies every request. Enforced server-side
+// before any tool runs.
 func (s Scope) AllowsTarget(req Target) bool {
 	if strings.TrimSpace(req.Value) == "" {
 		return false
 	}
 	for _, t := range s.OutOfScope {
-		if matchScopeTarget(t, req) {
+		if matchesDenyTarget(t, req) {
 			return false
 		}
 	}
 	for _, t := range s.InScope {
-		if matchScopeTarget(t, req) {
+		if matchesAllowTarget(t, req) {
 			return true
 		}
 	}
 	return false
 }
 
-// matchScopeTarget reports whether a requested target matches a single scope
-// entry. Repo/image values retain exact comparison; network kinds are parsed and
-// normalized before comparison so malformed authorities fail closed.
+// matchesDenyTarget applies the conservative carve-out semantics. A malformed
+// deny cannot be enforced reliably, so it matches every request. URL denies are
+// host-wide even though URL allows are scheme-and-port specific.
+func matchesDenyTarget(scopeT, req Target) bool {
+	normalized, err := NormalizeTarget(scopeT, true)
+	if err != nil {
+		return true
+	}
+	if normalized.Kind == TargetURL {
+		identity, err := NormalizeURL(normalized.Value)
+		return err == nil && identity.Host == targetHost(req)
+	}
+	if normalized.Kind == TargetCIDR && req.Kind == TargetCIDR {
+		denied, err := netip.ParsePrefix(normalized.Value)
+		if err != nil {
+			return true
+		}
+		requested, err := netip.ParsePrefix(strings.TrimSpace(req.Value))
+		return err == nil && prefixesOverlap(denied, requested)
+	}
+	return matchScopeTarget(normalized, req)
+}
+
+func targetHost(t Target) string {
+	if t.Kind == TargetImage {
+		return imageRegistryHost(t.Value)
+	}
+	return hostOf(t.Value)
+}
+
+// imageRegistryHost mirrors container reference registry selection: an explicit
+// first path component containing '.' or ':' (or localhost) is the registry;
+// otherwise the unqualified reference uses Docker Hub.
+func imageRegistryHost(value string) string {
+	ref := strings.TrimSpace(value)
+	if ref == "" || strings.ContainsAny(ref, " \t\r\n") {
+		return ""
+	}
+	i := strings.IndexByte(ref, '/')
+	if i <= 0 {
+		return "docker.io"
+	}
+	first := ref[:i]
+	if first != "localhost" && !strings.ContainsAny(first, ".:") {
+		return "docker.io"
+	}
+	host, _, _, err := NormalizeEndpoint(first)
+	if err == nil {
+		return host
+	}
+	host, err = NormalizeHost(first)
+	if err == nil {
+		return host
+	}
+	return ""
+}
+
+func prefixesOverlap(a, b netip.Prefix) bool {
+	return a.Addr().BitLen() == b.Addr().BitLen() &&
+		(a.Contains(b.Addr()) || b.Contains(a.Addr()))
+}
+
+// matchesAllowTarget applies least-privilege allow semantics. Invalid entries
+// grant nothing.
+func matchesAllowTarget(scopeT, req Target) bool {
+	normalized, err := NormalizeTarget(scopeT, true)
+	if err != nil {
+		return false
+	}
+	return matchScopeTarget(normalized, req)
+}
+
+// matchScopeTarget compares a normalized scope entry with a request. Repo/image
+// values retain their established comparisons; network requests are parsed without
+// DNS resolution. URL entries use the strict allow identity here; deny-side URL
+// host matching is handled separately by matchesDenyTarget.
 func matchScopeTarget(scopeT, req Target) bool {
-	if strings.TrimSpace(scopeT.Value) == "" || strings.TrimSpace(req.Value) == "" {
+	if strings.TrimSpace(req.Value) == "" {
 		return false
 	}
 	if scopeT.Kind == TargetRepo && req.Kind == TargetRepo && localPathContains(scopeT.Value, req.Value) {
@@ -86,16 +158,16 @@ func matchScopeTarget(scopeT, req Target) bool {
 		return true
 	}
 
-	scopeT, err := NormalizeTarget(scopeT, true)
-	if err != nil {
-		return false
-	}
-
 	switch scopeT.Kind {
 	case TargetCIDR:
 		pfx, err := netip.ParsePrefix(scopeT.Value)
 		if err != nil {
 			return false
+		}
+		if req.Kind == TargetCIDR {
+			requested, err := netip.ParsePrefix(strings.TrimSpace(req.Value))
+			return err == nil && pfx.Addr().BitLen() == requested.Addr().BitLen() &&
+				pfx.Bits() <= requested.Bits() && pfx.Contains(requested.Addr())
 		}
 		ip, ok := addrOf(req.Value)
 		return ok && pfx.Contains(ip)

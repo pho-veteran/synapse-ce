@@ -38,36 +38,66 @@ func Compile(scope engagement.Scope) ports.EgressPolicy {
 // addTarget compiles one target into a concrete rule (or a pending-domain entry).
 func addTarget(p *ports.EgressPolicy, allow bool, t engagement.Target) {
 	v := strings.TrimSpace(t.Value)
+	if t.Kind == engagement.TargetRepo || t.Kind == engagement.TargetImage {
+		return
+	}
 	if v == "" {
+		if !allow {
+			addDenyAll(p)
+		}
 		return
 	}
 	switch t.Kind {
 	case engagement.TargetCIDR:
 		if pfx, err := netip.ParsePrefix(v); err == nil {
 			p.Rules = append(p.Rules, ports.EgressRule{Allow: allow, Net: pfx.Masked()})
+		} else if !allow {
+			addDenyAll(p)
 		}
 	case engagement.TargetIP:
 		if a, err := netip.ParseAddr(v); err == nil {
 			p.Rules = append(p.Rules, ports.EgressRule{Allow: allow, Net: hostPrefix(a)})
+		} else if !allow {
+			addDenyAll(p)
 		}
 	case engagement.TargetURL:
 		host, port := urlHostPort(v)
 		if host == "" {
+			if !allow {
+				addDenyAll(p)
+			}
 			return
 		}
-		portList := []uint16{port}
+		var portList []uint16
+		if allow {
+			portList = []uint16{port}
+		}
 		if a, err := netip.ParseAddr(host); err == nil {
 			p.Rules = append(p.Rules, ports.EgressRule{Allow: allow, Net: hostPrefix(a), Ports: portList})
 			return
 		}
-		addDomainRule(p, allow, host, portList) // preserve URL scheme/effective port until resolution
+		addDomainRule(p, allow, host, portList)
 	case engagement.TargetDomain:
 		host, err := engagement.NormalizeDomainPattern(v)
 		if err != nil {
+			if !allow {
+				addDenyAll(p)
+			}
 			return
 		}
 		addDomain(p, allow, host)
+	default:
+		if !allow {
+			addDenyAll(p)
+		}
 	}
+}
+
+func addDenyAll(p *ports.EgressPolicy) {
+	p.Rules = append(p.Rules, ports.EgressRule{
+		Allow: false,
+		Net:   netip.PrefixFrom(netip.IPv4Unspecified(), 0),
+	})
 }
 
 func addDomain(p *ports.EgressPolicy, allow bool, host string) {

@@ -113,6 +113,50 @@ func TestCompileURLDomainPreservesEffectivePort(t *testing.T) {
 	}
 }
 
+func TestCompileOutOfScopeURLDeniesAllPorts(t *testing.T) {
+	p := Compile(engagement.Scope{
+		InScope: []engagement.Target{
+			target(engagement.TargetURL, "https://api.example.com:8443/admin"),
+			target(engagement.TargetURL, "https://203.0.113.9:8443/admin"),
+		},
+		OutOfScope: []engagement.Target{
+			target(engagement.TargetURL, "https://api.example.com:443/private"),
+			target(engagement.TargetURL, "http://203.0.113.9/private"),
+		},
+	})
+	if len(p.DenyDomainRules) != 1 {
+		t.Fatalf("deny URL hostname rules = %+v", p.DenyDomainRules)
+	}
+	if got := p.DenyDomainRules[0]; got.Host != "api.example.com" || len(got.Ports) != 0 {
+		t.Errorf("URL hostname deny must cover all ports: %+v", got)
+	}
+	if r := findRule(p, "203.0.113.9/32"); r == nil || r.Allow || len(r.Ports) != 0 {
+		t.Errorf("URL IP deny must cover all ports: %+v", r)
+	}
+	if len(p.AllowDomainRules) != 1 || !slices.Equal(p.AllowDomainRules[0].Ports, []uint16{8443}) {
+		t.Errorf("URL hostname allow must retain its port: %+v", p.AllowDomainRules)
+	}
+	allowIP := false
+	for _, r := range p.Rules {
+		if r.Allow && r.Net == netip.MustParsePrefix("203.0.113.9/32") && slices.Equal(r.Ports, []uint16{8443}) {
+			allowIP = true
+		}
+	}
+	if !allowIP {
+		t.Errorf("URL IP allow must retain its port: %+v", p.Rules)
+	}
+}
+
+func TestCompileMalformedNetworkDenyFailsClosed(t *testing.T) {
+	p := Compile(engagement.Scope{
+		InScope:    []engagement.Target{target(engagement.TargetCIDR, "10.0.0.0/8")},
+		OutOfScope: []engagement.Target{target(engagement.TargetURL, "not-a-url")},
+	})
+	if r := findRule(p, "0.0.0.0/0"); r == nil || r.Allow || len(r.Ports) != 0 {
+		t.Errorf("malformed network deny must compile to deny-all: %+v", p.Rules)
+	}
+}
+
 func TestCompileIgnoresRepoImageAndJunk(t *testing.T) {
 	p := Compile(engagement.Scope{InScope: []engagement.Target{
 		target(engagement.TargetRepo, "/srv/app"),
