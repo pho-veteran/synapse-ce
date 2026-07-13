@@ -202,6 +202,37 @@ spec:
 	}
 }
 
+func TestKubernetesCronJobPodSpec(t *testing.T) {
+	manifest := `apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: app
+  namespace: prod
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          automountServiceAccountToken: false
+          serviceAccountName: app
+          containers:
+          - name: app
+            image: app:1
+            env:
+            - name: API_TOKEN
+              value: literal
+`
+	got := ruleIDs(scan(t, map[string]string{"cronjob.yaml": manifest}))
+	if _, ok := got["kubernetes-secret-in-env"]; !ok {
+		t.Errorf("CronJob literal secret env must be flagged, got %v", keys(got))
+	}
+	for _, rule := range []string{"kubernetes-default-service-account", "kubernetes-automount-sa-token"} {
+		if _, bad := got[rule]; bad {
+			t.Errorf("CronJob with secure pod spec must not trigger %q", rule)
+		}
+	}
+}
+
 func TestKubernetesUnhardenedFlagged(t *testing.T) {
 	// A container with no securityContext now yields the missing-hardening findings (the comprehensive
 	// KSV/CIS posture that matches Trivy/kube-bench); the earlier low-FP "stay quiet" policy was

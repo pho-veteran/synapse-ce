@@ -57,6 +57,9 @@ type k8sSpec struct {
 	Template                     *struct {
 		Spec k8sSpec `yaml:"spec"`
 	} `yaml:"template"`
+	JobTemplate *struct {
+		Spec k8sSpec `yaml:"spec"`
+	} `yaml:"jobTemplate"`
 	TLS []k8sIngressTLS `yaml:"tls"`
 }
 
@@ -129,8 +132,12 @@ type ctnSecCtx struct {
 	} `yaml:"seccompProfile"`
 }
 
-// podSpec resolves the effective pod spec: a workload's spec.template.spec, or the object's own spec.
+// podSpec resolves the effective pod spec: CronJobs nest it under jobTemplate.spec.template.spec,
+// other workloads use template.spec, and a bare Pod uses spec directly.
 func (s k8sSpec) podSpec() k8sSpec {
+	if s.JobTemplate != nil {
+		return s.JobTemplate.Spec.podSpec()
+	}
 	if s.Template != nil {
 		return s.Template.Spec
 	}
