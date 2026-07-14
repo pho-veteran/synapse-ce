@@ -35,6 +35,102 @@ var javaRules = map[string]pythonRule{
 	"unnecessary-else":   {"quality", "java-ast-unnecessary-else", "", "low", "Unnecessary else after a jump", "When the if branch always returns/throws, the else is redundant; dedent its body."},
 	"nested-switch":      {"quality", "java-ast-nested-switch", "", "low", "Nested switch statement", "A switch inside another switch is hard to follow; extract the inner switch into a method."},
 	"ternary-boolean":    {"quality", "java-ast-ternary-boolean", "", "low", "Ternary returning boolean literals", "cond ? true : false is just the condition (or its negation)."},
+	"param-reassign":     {"quality", "java-ast-param-reassign", "", "low", "Reassigned method parameter", "Reassigning a parameter hides the original argument; use a local variable."},
+	"small-switch":       {"quality", "java-ast-small-switch", "", "low", "switch with very few cases", "A switch with only one or two cases is clearer as an if/else."},
+	"self-assign":        {"reliability", "java-ast-self-assign", "", "medium", "Self assignment", "Assigning a variable to itself has no effect and is usually a mistake."},
+	"self-compare":       {"reliability", "java-ast-self-comparison", "", "medium", "Self comparison", "Comparing a value to itself is constant and misses the intended operand."},
+	"empty-switch":       {"reliability", "java-ast-empty-switch", "", "low", "Empty switch statement", "A switch with no cases does nothing; remove it or add cases."},
+	"empty-try":          {"reliability", "java-ast-empty-try", "", "low", "Empty try block", "A try with an empty body guards nothing."},
+	"switch-fallthrough": {"reliability", "java-ast-switch-fallthrough", "", "medium", "switch case falls through", "A non-empty case that does not end in break/return/throw/continue falls through to the next case."},
+	"useless-ctor":       {"quality", "java-ast-useless-constructor", "", "low", "Useless constructor", "A constructor that only forwards its arguments to super adds nothing and can be removed."},
+	"negated-if-else":    {"quality", "java-ast-negated-if-else", "", "low", "Negated condition with else", "if (!cond) A else B reads more clearly when the condition is positive: if (cond) B else A."},
+	"dup-if-cond":        {"reliability", "java-ast-duplicate-if-condition", "", "medium", "Duplicate condition in if/else-if chain", "Two branches in the same if/else-if chain test the identical condition, so the later branch is unreachable."},
+	"if-chain-no-else":   {"quality", "java-ast-if-chain-no-else", "", "low", "if/else-if chain without a final else", "An if/else-if chain with no closing else silently ignores the remaining cases; add an else, even one that throws."},
+}
+
+// javaSwitchJumps are statements that terminate a switch case group.
+var javaSwitchJumps = map[string]bool{
+	"break_statement": true, "return_statement": true, "throw_statement": true,
+	"continue_statement": true, "yield_statement": true,
+}
+
+// javaSwitchFallsThrough reports whether a switch has a non-empty case group (other than the last)
+// that does not end in a terminating statement, i.e. it falls through.
+func javaSwitchFallsThrough(n *sitter.Node) bool {
+	body := n.ChildByFieldName("body")
+	if body == nil {
+		return false
+	}
+	var groups []*sitter.Node
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		if body.NamedChild(i).Type() == "switch_block_statement_group" {
+			groups = append(groups, body.NamedChild(i))
+		}
+	}
+	for gi := 0; gi < len(groups)-1; gi++ {
+		g := groups[gi]
+		if g.NamedChildCount() == 0 {
+			continue
+		}
+		last := g.NamedChild(int(g.NamedChildCount()) - 1)
+		if last.Type() == "switch_label" {
+			continue // labels only: intentional fall-through stacking
+		}
+		if !javaSwitchJumps[last.Type()] {
+			return true
+		}
+	}
+	return false
+}
+
+// javaFuncTypes bound "within this method/lambda" searches.
+var javaFuncTypes = map[string]bool{
+	"method_declaration": true, "constructor_declaration": true, "lambda_expression": true, "class_declaration": true,
+}
+
+// javaMethodParamNames returns the declared parameter names of a method/constructor node.
+func javaMethodParamNames(n *sitter.Node, src []byte) map[string]bool {
+	out := map[string]bool{}
+	p := n.ChildByFieldName("parameters")
+	if p == nil {
+		return out
+	}
+	for i := 0; i < int(p.NamedChildCount()); i++ {
+		c := p.NamedChild(i)
+		if c.Type() == "formal_parameter" || c.Type() == "spread_parameter" {
+			if nm := c.ChildByFieldName("name"); nm != nil {
+				out[strings.TrimSpace(nm.Content(src))] = true
+			}
+		}
+	}
+	return out
+}
+
+// javaHasParamReassign reports whether n's subtree assigns to one of the given parameter names,
+// without descending into nested methods/lambdas.
+func javaHasParamReassign(n *sitter.Node, params map[string]bool, src []byte) bool {
+	for i := 0; i < int(n.ChildCount()); i++ {
+		c := n.Child(i)
+		if javaFuncTypes[c.Type()] {
+			continue
+		}
+		switch c.Type() {
+		case "assignment_expression":
+			if l := c.ChildByFieldName("left"); l != nil && l.Type() == "identifier" && params[strings.TrimSpace(l.Content(src))] {
+				return true
+			}
+		case "update_expression":
+			for j := 0; j < int(c.NamedChildCount()); j++ {
+				if o := c.NamedChild(j); o.Type() == "identifier" && params[strings.TrimSpace(o.Content(src))] {
+					return true
+				}
+			}
+		}
+		if javaHasParamReassign(c, params, src) {
+			return true
+		}
+	}
+	return false
 }
 
 // javaControlTypes / javaLoopTypes are the node kinds counted for nesting-depth metrics.
@@ -83,6 +179,9 @@ func javaFindings(root *sitter.Node, src []byte, rel string) []QualityFinding {
 				if javaComplexity(body, src) > 15 {
 					out = append(out, javaFinding("high-complexity", n, rel))
 				}
+				if params := javaMethodParamNames(n, src); len(params) > 0 && javaHasParamReassign(body, params, src) {
+					out = append(out, javaFinding("param-reassign", n, rel))
+				}
 			}
 		case "ternary_expression":
 			if javaHasDescendantType(n, "ternary_expression") {
@@ -96,6 +195,13 @@ func javaFindings(root *sitter.Node, src []byte, rel string) []QualityFinding {
 		case "catch_clause":
 			if javaIsUselessCatch(n, src) {
 				out = append(out, javaFinding("useless-catch", n, rel))
+			}
+		case "constructor_declaration":
+			if body := n.ChildByFieldName("body"); body != nil && body.NamedChildCount() == 1 {
+				st := body.NamedChild(0)
+				if st.Type() == "explicit_constructor_invocation" && strings.HasPrefix(strings.TrimSpace(st.Content(src)), "super") {
+					out = append(out, javaFinding("useless-ctor", n, rel))
+				}
 			}
 		case "for_statement", "while_statement", "do_statement", "enhanced_for_statement":
 			if body := n.ChildByFieldName("body"); body != nil && body.Type() == "block" && body.NamedChildCount() == 0 {
@@ -114,9 +220,39 @@ func javaFindings(root *sitter.Node, src []byte, rel string) []QualityFinding {
 			if javaHasDescendantType(n, "switch_statement") || javaHasDescendantType(n, "switch_expression") {
 				out = append(out, javaFinding("nested-switch", n, rel))
 			}
+			switch labels := javaCountByType(n, map[string]bool{"switch_label": true, "switch_rule": true}); {
+			case labels == 0:
+				out = append(out, javaFinding("empty-switch", n, rel))
+			case labels >= 1 && labels < 3:
+				out = append(out, javaFinding("small-switch", n, rel))
+			}
+			if javaSwitchFallsThrough(n) {
+				out = append(out, javaFinding("switch-fallthrough", n, rel))
+			}
+		case "assignment_expression":
+			if op := n.ChildByFieldName("operator"); op != nil && strings.TrimSpace(op.Content(src)) == "=" {
+				l, rr := n.ChildByFieldName("left"), n.ChildByFieldName("right")
+				if l != nil && rr != nil && l.Type() == "identifier" && rr.Type() == "identifier" &&
+					strings.TrimSpace(l.Content(src)) == strings.TrimSpace(rr.Content(src)) {
+					out = append(out, javaFinding("self-assign", n, rel))
+				}
+			}
+		case "binary_expression":
+			if op := n.ChildByFieldName("operator"); op != nil {
+				switch strings.TrimSpace(op.Content(src)) {
+				case "==", "<", ">", "<=", ">=":
+					l, rr := n.ChildByFieldName("left"), n.ChildByFieldName("right")
+					if l != nil && rr != nil && strings.TrimSpace(l.Content(src)) == strings.TrimSpace(rr.Content(src)) {
+						out = append(out, javaFinding("self-compare", n, rel))
+					}
+				}
+			}
 		case "try_statement":
 			if javaHasNestedTry(n) {
 				out = append(out, javaFinding("nested-try", n, rel))
+			}
+			if body := n.ChildByFieldName("body"); body != nil && body.Type() == "block" && body.NamedChildCount() == 0 {
+				out = append(out, javaFinding("empty-try", n, rel))
 			}
 		case "if_statement":
 			cons := n.ChildByFieldName("consequence")
@@ -150,6 +286,27 @@ func javaFindings(root *sitter.Node, src []byte, rel string) []QualityFinding {
 			if n.ChildByFieldName("alternative") != nil && javaBlockEndsInJump(cons) {
 				out = append(out, javaFinding("unnecessary-else", n, rel))
 			}
+			if alt := n.ChildByFieldName("alternative"); alt != nil && alt.Type() == "block" {
+				if cond := n.ChildByFieldName("condition"); cond != nil {
+					inner := cond
+					if cond.Type() == "parenthesized_expression" && cond.NamedChildCount() > 0 {
+						inner = cond.NamedChild(0)
+					}
+					if inner != nil && inner.Type() == "unary_expression" && strings.HasPrefix(strings.TrimSpace(inner.Content(src)), "!") {
+						out = append(out, javaFinding("negated-if-else", n, rel))
+					}
+				}
+			}
+			if !javaIsElseIf(n) {
+				if conds, endsElse := javaIfChain(n, src); len(conds) >= 2 {
+					if javaHasDupString(conds) {
+						out = append(out, javaFinding("dup-if-cond", n, rel))
+					}
+					if !endsElse {
+						out = append(out, javaFinding("if-chain-no-else", n, rel))
+					}
+				}
+			}
 		case "class_declaration":
 			if body := n.ChildByFieldName("body"); body != nil {
 				methods := 0
@@ -175,6 +332,50 @@ func javaFindings(root *sitter.Node, src []byte, rel string) []QualityFinding {
 		}
 	}
 	return dedupeQuality(out)
+}
+
+// javaIsElseIf reports whether n is the "else if" arm of an enclosing if statement
+// (i.e. its parent's alternative), so chain-level checks run only once at the head.
+func javaIsElseIf(n *sitter.Node) bool {
+	p := n.Parent()
+	if p == nil || p.Type() != "if_statement" {
+		return false
+	}
+	alt := p.ChildByFieldName("alternative")
+	return alt != nil && alt.StartByte() == n.StartByte() && alt.EndByte() == n.EndByte()
+}
+
+// javaIfChain walks an if/else-if chain from its head, returning each branch's
+// condition text and whether the chain closes with a plain else block.
+func javaIfChain(n *sitter.Node, src []byte) ([]string, bool) {
+	var conds []string
+	for cur := n; cur != nil && cur.Type() == "if_statement"; {
+		if c := cur.ChildByFieldName("condition"); c != nil {
+			conds = append(conds, strings.TrimSpace(c.Content(src)))
+		}
+		alt := cur.ChildByFieldName("alternative")
+		if alt == nil {
+			return conds, false
+		}
+		if alt.Type() == "if_statement" {
+			cur = alt
+			continue
+		}
+		return conds, true
+	}
+	return conds, false
+}
+
+// javaHasDupString reports whether ss contains a repeated element.
+func javaHasDupString(ss []string) bool {
+	seen := make(map[string]bool, len(ss))
+	for _, s := range ss {
+		if seen[s] {
+			return true
+		}
+		seen[s] = true
+	}
+	return false
 }
 
 // javaSwitchHasDefault reports whether a switch node contains a default label.

@@ -775,3 +775,86 @@ func TestQualityForJSUselessConstructor(t *testing.T) {
 	}
 	t.Errorf("missing js-ast-useless-constructor in %+v", res.Findings)
 }
+
+func TestQualityForJavaASTBehavioral2(t *testing.T) {
+	root := t.TempDir()
+	src := "class C {\n" +
+		"  int add(int base, int extra) {\n    base = base + extra;\n    return base;\n  }\n" +
+		"  void toggle(int state) {\n    switch (state) {\n      case 1: on(); break;\n      default: off();\n    }\n  }\n" +
+		"  void f(int count) {\n    count = count;\n    if (count == count) { run(); }\n  }\n" +
+		"}\n"
+	writeFile(t, root, "C.java", src)
+	res, err := QualityFor(context.Background(), root)
+	if err != nil {
+		t.Fatalf("QualityFor: %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range res.Findings {
+		got[f.Rule] = true
+	}
+	for _, rule := range []string{"java-ast-param-reassign", "java-ast-small-switch", "java-ast-self-assign", "java-ast-self-comparison"} {
+		if !got[rule] {
+			t.Errorf("missing %s in %+v", rule, res.Findings)
+		}
+	}
+}
+
+func TestQualityForJavaASTMore(t *testing.T) {
+	root := t.TempDir()
+	src := "class C {\n" +
+		"  void a(int state) {\n    switch (state) {\n    }\n  }\n" +
+		"  void b() {\n    try {\n    } catch (Exception e) {\n      log(e);\n    }\n  }\n" +
+		"  int c(int n) {\n    switch (n) {\n      case 1:\n        one();\n      case 2:\n        two();\n        break;\n      default:\n        return 0;\n    }\n    return -1;\n  }\n" +
+		"}\n"
+	writeFile(t, root, "C.java", src)
+	res, err := QualityFor(context.Background(), root)
+	if err != nil {
+		t.Fatalf("QualityFor: %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range res.Findings {
+		got[f.Rule] = true
+	}
+	for _, rule := range []string{"java-ast-empty-switch", "java-ast-empty-try", "java-ast-switch-fallthrough"} {
+		if !got[rule] {
+			t.Errorf("missing %s in %+v", rule, res.Findings)
+		}
+	}
+}
+
+func TestQualityForJavaIfChain(t *testing.T) {
+	root := t.TempDir()
+	src := "class Z {\n" +
+		"  void m(boolean ready) {\n    if (!ready) {\n      wait();\n    } else {\n      start();\n    }\n  }\n" +
+		"  void n(int x) {\n    if (x == 1) {\n      a();\n    } else if (x == 1) {\n      b();\n    }\n  }\n" +
+		"}\n"
+	writeFile(t, root, "Z.java", src)
+	res, err := QualityFor(context.Background(), root)
+	if err != nil {
+		t.Fatalf("QualityFor: %v", err)
+	}
+	got := map[string]bool{}
+	for _, f := range res.Findings {
+		got[f.Rule] = true
+	}
+	for _, rule := range []string{"java-ast-negated-if-else", "java-ast-duplicate-if-condition", "java-ast-if-chain-no-else"} {
+		if !got[rule] {
+			t.Errorf("missing %s in %+v", rule, res.Findings)
+		}
+	}
+}
+
+func TestQualityForJavaUselessCtor(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "D.java", "class Derived extends Base {\n  Derived(String name) {\n    super(name);\n  }\n}\n")
+	res, err := QualityFor(context.Background(), root)
+	if err != nil {
+		t.Fatalf("QualityFor: %v", err)
+	}
+	for _, x := range res.Findings {
+		if x.Rule == "java-ast-useless-constructor" {
+			return
+		}
+	}
+	t.Errorf("missing java-ast-useless-constructor in %+v", res.Findings)
+}
