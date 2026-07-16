@@ -16,6 +16,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/ignore"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/judgment"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
@@ -33,6 +34,14 @@ type Clock interface {
 // IDGenerator issues new domain identifiers.
 type IDGenerator interface {
 	NewID() shared.ID
+}
+
+// ProjectRepository persists tenant-scoped Project aggregates.
+type ProjectRepository interface {
+	Create(ctx context.Context, p *project.Project) error
+	List(ctx context.Context, tenantID shared.ID) ([]*project.Project, error)
+	GetByKey(ctx context.Context, tenantID shared.ID, key string) (*project.Project, error)
+	DeleteByKey(ctx context.Context, tenantID shared.ID, key string) error
 }
 
 // EngagementRepository persists engagements. Returned aggregates are read-only –
