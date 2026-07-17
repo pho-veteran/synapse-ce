@@ -73,7 +73,7 @@ func (s *ProjectAnalysisStore) LatestWithResult(_ context.Context, tenantID, pro
 	var latest *storedProjectAnalysis
 	for i := range s.data {
 		current := &s.data[i]
-		if current.analysis.ProjectID != projectID.String() || (!tenantID.IsZero() && current.analysis.TenantID != tenantID.String()) {
+		if current.analysis.ProjectID != projectID.String() || (!tenantID.IsZero() && current.analysis.TenantID != tenantID.String()) || len(current.result) == 0 {
 			continue
 		}
 		if latest == nil || current.analysis.CreatedAt.After(latest.analysis.CreatedAt) || (current.analysis.CreatedAt.Equal(latest.analysis.CreatedAt) && current.analysis.ID > latest.analysis.ID) {

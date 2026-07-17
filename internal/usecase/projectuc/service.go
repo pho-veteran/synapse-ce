@@ -18,7 +18,6 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
-	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/qualityprofile"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 	qualitygatesuc "github.com/KKloudTarus/synapse-ce/internal/usecase/qualitygates"
 	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
@@ -151,7 +150,7 @@ type ProjectSummary struct {
 }
 
 // ListSummaries serves the unpaginated Project portfolio without browser-side N+1 requests.
-// ponytail: add cursor pagination plus server-side filters when returning a tenant's full searchable portfolio becomes materially expensive.
+// add cursor pagination plus server-side filters when returning a tenant's full searchable portfolio becomes materially expensive.
 func (s *Service) ListSummaries(ctx context.Context, tenantID shared.ID) ([]ProjectSummary, error) {
 	projects, err := s.List(ctx, tenantID)
 	if err != nil {
@@ -170,24 +169,9 @@ func (s *Service) ListSummaries(ctx context.Context, tenantID shared.ID) ([]Proj
 	}
 	contexts := map[shared.ID]*engagement.Engagement{}
 	if s.scanner != nil && s.engagements != nil {
-		if store, ok := s.engagements.(interface {
-			ProjectContexts(context.Context, shared.ID, []shared.ID) (map[shared.ID]*engagement.Engagement, error)
-		}); ok {
-			contexts, err = store.ProjectContexts(ctx, tenantID, projectIDs)
-			if err != nil {
-				return nil, fmt.Errorf("list project analysis contexts: %w", err)
-			}
-		} else {
-			for _, p := range projects {
-				e, getErr := s.engagements.GetByProjectID(ctx, tenantID, p.ID)
-				if errors.Is(getErr, shared.ErrNotFound) {
-					continue
-				}
-				if getErr != nil {
-					return nil, fmt.Errorf("get project analysis context: %w", getErr)
-				}
-				contexts[p.ID] = e
-			}
+		contexts, err = s.engagements.ProjectContexts(ctx, tenantID, projectIDs)
+		if err != nil {
+			return nil, fmt.Errorf("list project analysis contexts: %w", err)
 		}
 	}
 	engagementIDs := make([]shared.ID, 0, len(contexts))
@@ -275,7 +259,7 @@ func (s *Service) StartAnalysis(ctx context.Context, actor string, tenantID shar
 	}
 	return s.scanner.StartScanWithOptions(ctx, actor, e.ID, ports.AcquireRequest{
 		Kind: p.SourceBinding.Kind, Value: p.SourceBinding.Value, Ref: p.SourceBinding.Ref,
-	}, scauc.ScanOptions{Mode: scauc.ScanModeFull, CodeQuality: true, LineCoverage: coverage, Gate: gate})
+	}, scauc.ScanOptions{Mode: scauc.ScanModeFull, CodeQuality: true, ProjectAnalysis: true, LineCoverage: coverage, Gate: gate})
 }
 
 func (s *Service) AnalysisStatus(ctx context.Context, tenantID shared.ID, key string) (ports.ScanJob, error) {
@@ -399,12 +383,7 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 			return err
 		}
 	}
-	if p.GateID == "" && len(result.GateFile) > 0 {
-		var err error
-		gate, err = qualityprofile.LoadGateBytes(result.GateFile)
-		if err != nil {
-			return fmt.Errorf("load project quality gate: %w", err)
-		}
+	if p.GateID == "" && len(gate.Conditions) > 0 {
 		gateSource = "repository"
 	}
 	analysis, err := projectanalysis.Build(projectanalysis.Input{

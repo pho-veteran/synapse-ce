@@ -9,7 +9,7 @@ describe('Projects API', () => {
   it('maps project fields and portfolio summaries', async () => {
     fetchSpy.mockResolvedValueOnce({ ok: true, status: 200, json: async () => [{ ID: 'p1', Name: 'Synapse', Key: 'synapse', SourceBinding: { Kind: 'git', Value: 'https://example.com/repo.git', Ref: 'main' }, DefaultProfileByLang: { go: 'default' }, GateID: 'gate', Audit: { CreatedAt: '2026-07-15T00:00:00Z' }, latest_analysis: { id: 'a1', gate: { passed: false, results: [] }, gate_info: { key: 'release', name: 'Release', source: 'managed' } }, latest_job: { id: 'j1', status: 'succeeded' } }] } as Response)
     const projects = await api.listProjects()
-    expect(projects[0]).toMatchObject({ id: 'p1', key: 'synapse', gateId: 'gate', sourceBinding: { kind: 'git', ref: 'main' }, latestAnalysis: { id: 'a1', gateInfo: { name: 'Release', source: 'managed' } }, latestJob: { id: 'j1', status: 'succeeded' } })
+    expect(projects[0]).toMatchObject({ id: 'p1', key: 'synapse', gateId: 'gate', sourceBinding: { kind: 'git', ref: 'main' }, latestAnalysis: { id: 'a1', gateInfo: { name: 'Release', source: 'managed' }, rating: { security: '?', reliability: '?', maintainability: '?' }, newCode: { rating: { security: '?', reliability: '?', maintainability: null } } }, latestJob: { id: 'j1', status: 'succeeded' } })
     expect(fetchSpy).toHaveBeenCalledWith('/api/v1/projects', expect.any(Object))
   })
 

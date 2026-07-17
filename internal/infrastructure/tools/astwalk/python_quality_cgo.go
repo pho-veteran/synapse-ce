@@ -593,7 +593,7 @@ func canonicalLiteralKey(s string) (string, bool) {
 		return "number:0", true
 	}
 	if len(s) >= 2 && ((s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"')) {
-		// ponytail: common quoted literals only; extend with a Python literal evaluator when escape-equivalent keys matter.
+		// common quoted literals only; extend with a Python literal evaluator when escape-equivalent keys matter.
 		return "string:" + s[1:len(s)-1], true
 	}
 	if n, err := strconv.ParseFloat(strings.ReplaceAll(s, "_", ""), 64); err == nil {

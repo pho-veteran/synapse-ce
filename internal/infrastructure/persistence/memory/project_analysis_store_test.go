@@ -72,6 +72,23 @@ func TestProjectAnalysisStoreLatestResultStaysWithSnapshot(t *testing.T) {
 	}
 }
 
+func TestProjectAnalysisStoreLatestResultSkipsMetadataOnlySnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := NewProjectAnalysisStore()
+	withResult := projectanalysis.Analysis{ID: "with-result", TenantID: "tenant", ProjectID: "project", CreatedAt: time.Unix(1, 0)}
+	metadataOnly := projectanalysis.Analysis{ID: "metadata-only", TenantID: "tenant", ProjectID: "project", CreatedAt: time.Unix(2, 0)}
+	if err := store.SaveWithResult(ctx, withResult, []byte(`{"run":"complete"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, metadataOnly); err != nil {
+		t.Fatal(err)
+	}
+	got, result, err := store.LatestWithResult(ctx, "tenant", "project")
+	if err != nil || got.ID != withResult.ID || string(result) != `{"run":"complete"}` {
+		t.Fatalf("analysis=%+v result=%s err=%v", got, result, err)
+	}
+}
+
 func TestProjectAnalysisStoreScopesAndOrdersSnapshots(t *testing.T) {
 	ctx := context.Background()
 	store := NewProjectAnalysisStore()

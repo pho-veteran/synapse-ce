@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/vulnerability"
@@ -39,6 +42,9 @@ func (f *fakeEngRepo) GetByIDInTenant(context.Context, shared.ID, shared.ID) (*e
 }
 func (*fakeEngRepo) GetByProjectID(context.Context, shared.ID, shared.ID) (*engdom.Engagement, error) {
 	return nil, shared.ErrNotFound
+}
+func (*fakeEngRepo) ProjectContexts(context.Context, shared.ID, []shared.ID) (map[shared.ID]*engdom.Engagement, error) {
+	return map[shared.ID]*engdom.Engagement{}, nil
 }
 func (f *fakeEngRepo) List(context.Context, shared.ID) ([]*engdom.Engagement, error) {
 	return nil, nil
@@ -210,6 +216,40 @@ func TestCodeQualityRequiresExplicitScanOption(t *testing.T) {
 	}
 	if quality.calls != 1 || project.CodeQuality == nil {
 		t.Fatalf("opted-in scan code quality: calls=%d report=%v", quality.calls, project.CodeQuality != nil)
+	}
+}
+
+func TestProjectScanLoadsRepositoryGate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".synapse-gate.yaml"), []byte("conditions:\n  - metric: new_high\n    op: \">=\"\n    threshold: 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := &fakeEngRepo{eng: engagementWithScope(t, "myrepo")}
+	svc := newSvc(repo, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: dir}, &fakeAudit{}, &fakeDetector{})
+	svc.SetGateDecoder(func(data []byte) (qualitygate.Gate, error) {
+		if string(data) == "" {
+			t.Fatal("gate decoder received no data")
+		}
+		return qualitygate.Gate{Conditions: []qualitygate.Condition{{Metric: qualitygate.MetricNewHigh, Op: qualitygate.OpGE, Threshold: 0}}}, nil
+	})
+
+	result, err := svc.ScanWithOptions(context.Background(), "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull, ProjectAnalysis: true})
+	if err != nil || len(result.Gate.Conditions) != 1 || result.Gate.Conditions[0].Metric != qualitygate.MetricNewHigh {
+		t.Fatalf("gate=%+v err=%v", result.Gate, err)
+	}
+}
+
+func TestProjectScanRejectsMalformedRepositoryGate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".synapse-gate.yaml"), []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := &fakeEngRepo{eng: engagementWithScope(t, "myrepo")}
+	svc := newSvc(repo, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: dir}, &fakeAudit{}, &fakeDetector{})
+	svc.SetGateDecoder(func([]byte) (qualitygate.Gate, error) { return qualitygate.Gate{}, errors.New("malformed gate") })
+
+	if _, err := svc.ScanWithOptions(context.Background(), "operator", "e1", ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull, ProjectAnalysis: true}); err == nil || !strings.Contains(err.Error(), "load project quality gate") {
+		t.Fatalf("err=%v, want gate load failure", err)
 	}
 }
 
@@ -687,6 +727,18 @@ func (f *fakeJobStore) LatestForEngagement(_ context.Context, id shared.ID) (por
 	return j, nil
 }
 
+func (f *fakeJobStore) LatestForEngagements(_ context.Context, ids []shared.ID) (map[shared.ID]ports.ScanJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[shared.ID]ports.ScanJob{}
+	for _, id := range ids {
+		if job, ok := f.jobs[id.String()]; ok {
+			out[id] = job
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeJobStore) GetJob(_ context.Context, id string) (ports.ScanJob, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -796,7 +848,7 @@ func TestProjectRecorderUsesFreshCompletionContext(t *testing.T) {
 	svc.SetProjectAnalysisRecorder(recorder)
 	job := ports.ScanJob{ID: "job-1", EngagementID: "e1", Status: ports.ScanRunning, StartedAt: time.Unix(0, 0).UTC()}
 
-	svc.runScanJob("operator", "e1", time.Unix(0, 0).UTC(), ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull}, job)
+	svc.runScanJob("operator", "e1", time.Unix(0, 0).UTC(), ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull, ProjectAnalysis: true}, job)
 
 	final, err := jobs.LatestForEngagement(context.Background(), "e1")
 	if err != nil {
@@ -810,7 +862,7 @@ func TestProjectRecorderUsesFreshCompletionContext(t *testing.T) {
 	}
 }
 
-func TestProjectRecorderFailureFailsJob(t *testing.T) {
+func TestOrdinaryScanSkipsProjectRecorder(t *testing.T) {
 	repo := &fakeEngRepo{eng: engagementWithScope(t, "myrepo")}
 	jobs := newFakeJobStore()
 	svc := newAsyncSvc(repo, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: "/tmp/ws"}, &fakeAudit{}, &fakeDetector{}, jobs, fakeIDs{})
@@ -818,6 +870,24 @@ func TestProjectRecorderFailureFailsJob(t *testing.T) {
 	job := ports.ScanJob{ID: "job-1", EngagementID: "e1", Status: ports.ScanRunning, StartedAt: time.Unix(0, 0).UTC()}
 
 	svc.runScanJob("operator", "e1", time.Unix(0, 0).UTC(), ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull}, job)
+
+	final, err := jobs.LatestForEngagement(context.Background(), "e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != ports.ScanSucceeded {
+		t.Fatalf("status=%q err=%q, want succeeded", final.Status, final.Error)
+	}
+}
+
+func TestProjectRecorderFailureFailsJob(t *testing.T) {
+	repo := &fakeEngRepo{eng: engagementWithScope(t, "myrepo")}
+	jobs := newFakeJobStore()
+	svc := newAsyncSvc(repo, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: "/tmp/ws"}, &fakeAudit{}, &fakeDetector{}, jobs, fakeIDs{})
+	svc.SetProjectAnalysisRecorder(&contextRecorder{err: errors.New("snapshot unavailable")})
+	job := ports.ScanJob{ID: "job-1", EngagementID: "e1", Status: ports.ScanRunning, StartedAt: time.Unix(0, 0).UTC()}
+
+	svc.runScanJob("operator", "e1", time.Unix(0, 0).UTC(), ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull, ProjectAnalysis: true}, job)
 
 	final, err := jobs.LatestForEngagement(context.Background(), "e1")
 	if err != nil {

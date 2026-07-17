@@ -105,6 +105,7 @@ type EngagementRepository interface {
 	// GetByProjectID loads the hidden Project analysis context scoped to tenantID.
 	// It is only for Project use-case internals; normal engagement reads must use GetByIDInTenant.
 	GetByProjectID(ctx context.Context, tenantID, projectID shared.ID) (*engagement.Engagement, error)
+	ProjectContexts(ctx context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]*engagement.Engagement, error)
 	List(ctx context.Context, tenantID shared.ID) ([]*engagement.Engagement, error)
 	// Update persists changes to an existing engagement aggregate – its row
 	// (name/client/status/authorization window/timezone) and its full scope target
@@ -289,6 +290,7 @@ type ScanJobStore interface {
 	CreateRunning(ctx context.Context, job ScanJob) error
 	Save(ctx context.Context, job ScanJob) error
 	LatestForEngagement(ctx context.Context, engagementID shared.ID) (ScanJob, error)
+	LatestForEngagements(ctx context.Context, engagementIDs []shared.ID) (map[shared.ID]ScanJob, error)
 	// GetJob returns a scan job by its own id (shared.ErrNotFound if absent). Used to
 	// finalize a SPECIFIC dead-lettered job rather than the engagement's latest, so a newer
 	// scan for the same engagement cannot mislead the dead-letter terminal-guard.
@@ -657,6 +659,9 @@ func (w *Workspace) Close() error {
 type Acquirer interface {
 	Acquire(ctx context.Context, req AcquireRequest) (*Workspace, error)
 }
+
+// GateDecoder parses a repository quality-gate document after SCA acquires its workspace.
+type GateDecoder func([]byte) (qualitygate.Gate, error)
 
 // ---- SCA tool ports (implemented by infrastructure/tools adapters) ----
 

@@ -97,6 +97,7 @@ type Service struct {
 	projectAnalysisRecorder interface {
 		RecordProjectAnalysis(context.Context, shared.ID, string, time.Time, *ScanResult) error
 	}
+	gateDecoder ports.GateDecoder
 }
 
 // SetSeverityEnricher configures optional severity backfill (NVD CVSS) for vulnerabilities the
@@ -120,6 +121,8 @@ func (s *Service) SetProjectAnalysisRecorder(r interface {
 }) {
 	s.projectAnalysisRecorder = r
 }
+
+func (s *Service) SetGateDecoder(decoder ports.GateDecoder) { s.gateDecoder = decoder }
 
 // SetIgnoreUnfixed controls whether vulnerabilities with no available fix are promoted to
 // findings. true = suppress them (Trivy's --ignore-unfixed); they stay in the vuln inventory.
@@ -495,7 +498,6 @@ type ScanResult struct {
 	CodeQuality              *codequality.Report      `json:"code_quality,omitempty"`
 	LineCoverage             *measure.CoverageReport  `json:"line_coverage,omitempty"`
 	Gate                     qualitygate.Gate         `json:"-"`
-	GateFile                 []byte                   `json:"-"`
 	// Coverage is the per-ecosystem component tally: components + resolved-version counts per
 	// ecosystem, so a thin / partially-resolved ecosystem is VISIBLE rather than hidden behind the single
 	// global Completeness number ("no silent gap").
@@ -593,8 +595,8 @@ type ScanOptions struct {
 	// DetectionPriority selects comprehensive (default) or precise; see the Detection* consts.
 	DetectionPriority string                  `json:"detection_priority,omitempty"`
 	CodeQuality       bool                    `json:"code_quality,omitempty"`
+	ProjectAnalysis   bool                    `json:"project_analysis,omitempty"`
 	LineCoverage      *measure.CoverageReport `json:"line_coverage,omitempty"`
-	GateFile          []byte                  `json:"gate_file,omitempty"`
 	Gate              qualitygate.Gate        `json:"gate,omitempty"`
 }
 
@@ -1096,8 +1098,10 @@ func (s *Service) StartScanWithOptions(ctx context.Context, actor string, engage
 		StartedAt:    now,
 		DebugEvents:  []ports.ScanDebugEvent{},
 	}
-	if err := s.jobs.CreateRunning(ctx, job); err != nil {
-		return ports.ScanJob{}, fmt.Errorf("create scan job: %w", err)
+	if s.jobs != nil {
+		if err := s.jobs.CreateRunning(ctx, job); err != nil {
+			return ports.ScanJob{}, fmt.Errorf("create scan job: %w", err)
+		}
 	}
 	// defer to the durable queue when configured (an in-process or separate worker
 	// claims + runs the pipeline with syft/grype sandboxed) – replaces the bare goroutine,
@@ -1261,23 +1265,7 @@ func (s *Service) LatestJobs(ctx context.Context, engagementIDs []shared.ID) (ma
 	if s.jobs == nil {
 		return map[shared.ID]ports.ScanJob{}, nil
 	}
-	if store, ok := s.jobs.(interface {
-		LatestForEngagements(context.Context, []shared.ID) (map[shared.ID]ports.ScanJob, error)
-	}); ok {
-		return store.LatestForEngagements(ctx, engagementIDs)
-	}
-	out := map[shared.ID]ports.ScanJob{}
-	for _, id := range engagementIDs {
-		job, err := s.jobs.LatestForEngagement(ctx, id)
-		if errors.Is(err, shared.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		out[id] = job
-	}
-	return out, nil
+	return s.jobs.LatestForEngagements(ctx, engagementIDs)
 }
 
 // gateAndAudit enforces scope + the authorization window and records the
@@ -1432,7 +1420,7 @@ func (s *Service) runScanJob(actor string, engagementID shared.ID, now time.Time
 	}
 
 	fin := s.clock.Now()
-	if err == nil && s.projectAnalysisRecorder != nil {
+	if err == nil && opts.ProjectAnalysis && s.projectAnalysisRecorder != nil {
 		completionCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err = s.projectAnalysisRecorder.RecordProjectAnalysis(completionCtx, engagementID, job.ID, fin, result)
 		cancel()
@@ -1579,7 +1567,6 @@ func (s *Service) runImportedSBOMPipeline(ctx context.Context, actor string, eng
 		DebugEvents:              trace.snapshot(),
 		LineCoverage:             opts.LineCoverage,
 		Gate:                     opts.Gate,
-		GateFile:                 opts.GateFile,
 	}
 	result.Findings = buildFindings(engagementID, result, now, s.minSeverity, s.ignoreUnfixed, nil)
 	result.MinSeverity = s.minSeverity
@@ -1662,11 +1649,21 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		trace.fail(step, err)
 		return nil, fmt.Errorf("acquire target: %w", err)
 	}
-	if opts.GateFile == nil {
-		opts.GateFile, err = readGateFile(ws.Dir)
-		if err != nil {
-			trace.fail(step, err)
-			return nil, err
+	if opts.ProjectAnalysis && len(opts.Gate.Conditions) == 0 {
+		data, readErr := readGateFile(ws.Dir)
+		if readErr != nil {
+			trace.fail(step, readErr)
+			return nil, readErr
+		}
+		if len(data) > 0 {
+			if s.gateDecoder == nil {
+				return nil, fmt.Errorf("%w: project quality gate decoder is not configured", shared.ErrValidation)
+			}
+			opts.Gate, err = s.gateDecoder(data)
+			if err != nil {
+				trace.fail(step, err)
+				return nil, fmt.Errorf("load project quality gate: %w", err)
+			}
 		}
 	}
 	trace.succeed(step, "Target workspace acquired", nil)
@@ -2146,7 +2143,6 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		DebugEvents:              trace.snapshot(),
 		LineCoverage:             opts.LineCoverage,
 		Gate:                     opts.Gate,
-		GateFile:                 opts.GateFile,
 	}
 	// Container-image layer attribution (Epic D): join each vuln to the layer that introduced
 	// its component, and classify base vs application layers. No-op for non-image scans.

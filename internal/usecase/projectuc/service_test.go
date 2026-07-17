@@ -184,6 +184,31 @@ func TestRecordProjectAnalysisUsesAssignedGate(t *testing.T) {
 	}
 }
 
+func TestRecordProjectAnalysisUsesRepositoryGate(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	svc := NewService(projects, engagements, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := engagements.GetByProjectID(ctx, p.TenantID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := qualitygate.Gate{Key: "repo", Name: "Repository gate", Conditions: []qualitygate.Condition{{Metric: qualitygate.MetricNewHigh, Op: qualitygate.OpLE, Threshold: 0}}}
+	if err := svc.RecordProjectAnalysis(ctx, e.ID, "job-1", time.Unix(1, 0), &scauc.ScanResult{Gate: gate}); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil || len(list) != 1 || list[0].GateInfo.Source != "repository" || list[0].GateInfo.Key != "repo" {
+		t.Fatalf("analysis=%+v err=%v", list, err)
+	}
+}
+
 func TestRecordProjectAnalysisPersistsLineCoverage(t *testing.T) {
 	ctx := context.Background()
 	projects := memory.NewProjectRepository()

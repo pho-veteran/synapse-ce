@@ -57,6 +57,15 @@ func (r *memRepo) GetByProjectID(_ context.Context, tenantID, projectID shared.I
 	}
 	return nil, shared.ErrNotFound
 }
+func (r *memRepo) ProjectContexts(_ context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]*domain.Engagement, error) {
+	out := map[shared.ID]*domain.Engagement{}
+	for _, id := range projectIDs {
+		if e, err := r.GetByProjectID(context.Background(), tenantID, id); err == nil {
+			out[id] = e
+		}
+	}
+	return out, nil
+}
 func (r *memRepo) List(context.Context, shared.ID) ([]*domain.Engagement, error) { return nil, nil }
 
 type fixedClock struct{ t time.Time }
