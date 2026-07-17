@@ -10,6 +10,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/agent"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/judgment"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	userdom "github.com/KKloudTarus/synapse-ce/internal/domain/user"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/writeupdraft"
@@ -60,6 +61,7 @@ type Router struct {
 	drafts       writeupDraftService // optional; nil ⇒ writeup-draft sign-off routes are not registered
 	codeQuality  codeQualityService  // optional; nil ⇒ the code-quality route is not registered
 	projects     projectService      // optional; nil ⇒ project routes are not registered
+	qualityGates qualityGateService  // optional; nil ⇒ quality-gate routes are not registered
 	rules        rulesService        // optional; nil ⇒ rule catalog routes are not registered
 }
 
@@ -126,6 +128,18 @@ func (rt *Router) SetThreatModel(s threatModelService) { rt.threatModels = s }
 // SetWriteupDrafts wires the human sign-off endpoints for AI-proposed write-up drafts. nil ⇒ not registered.
 func (rt *Router) SetWriteupDrafts(s writeupDraftService) { rt.drafts = s }
 
+// qualityGateService is the HTTP slice for tenant-scoped gate management.
+type qualityGateService interface {
+	List(context.Context, shared.ID) ([]qualitygate.Gate, error)
+	Get(context.Context, shared.ID, string) (qualitygate.Gate, error)
+	Create(context.Context, string, shared.ID, qualitygate.Gate) (qualitygate.Gate, error)
+	Update(context.Context, string, shared.ID, string, qualitygate.Gate) (qualitygate.Gate, error)
+	Delete(context.Context, string, shared.ID, string) error
+}
+
+// SetQualityGates wires quality gate management endpoints.
+func (rt *Router) SetQualityGates(s qualityGateService) { rt.qualityGates = s }
+
 // SetRules wires the rule catalog endpoints. nil ⇒ not registered.
 func (rt *Router) SetRules(s rulesService) { rt.rules = s }
 
@@ -189,11 +203,21 @@ func (rt *Router) routes() *http.ServeMux {
 	// caller then hits the tenant 404. Machine (mcp/agent) roles are granted nothing here.
 	mux.HandleFunc("GET /api/v1/aup", rt.getAUP)
 	mux.HandleFunc("POST /api/v1/aup/accept", rt.acceptAUP)
+	if rt.qualityGates != nil {
+		mux.HandleFunc("GET /api/v1/quality-gates", rt.authz(userdom.PermView, rt.listQualityGates))
+		mux.HandleFunc("GET /api/v1/quality-gates/{key}", rt.authz(userdom.PermView, rt.getQualityGate))
+		mux.HandleFunc("POST /api/v1/quality-gates", rt.authz(userdom.PermOperate, rt.createQualityGate))
+		mux.HandleFunc("PUT /api/v1/quality-gates/{key}", rt.authz(userdom.PermOperate, rt.updateQualityGate))
+		mux.HandleFunc("DELETE /api/v1/quality-gates/{key}", rt.authz(userdom.PermOperate, rt.deleteQualityGate))
+	}
 	if rt.projects != nil {
 		mux.HandleFunc("POST /api/v1/projects", rt.authz(userdom.PermOperate, rt.createProject))
 		mux.HandleFunc("GET /api/v1/projects", rt.authz(userdom.PermView, rt.listProjects))
 		mux.HandleFunc("GET /api/v1/projects/{key}", rt.authz(userdom.PermView, rt.getProject))
+		mux.HandleFunc("PUT /api/v1/projects/{key}/gate", rt.authz(userdom.PermOperate, rt.assignProjectGate))
 		mux.HandleFunc("POST /api/v1/projects/{key}/analyses", rt.authz(userdom.PermOperate, rt.startProjectAnalysis))
+		mux.HandleFunc("GET /api/v1/projects/{key}/analyses", rt.authz(userdom.PermView, rt.listProjectAnalyses))
+		mux.HandleFunc("GET /api/v1/projects/{key}/analyses/{id}", rt.authz(userdom.PermView, rt.getProjectAnalysis))
 		mux.HandleFunc("GET /api/v1/projects/{key}/analysis-status", rt.authz(userdom.PermView, rt.projectAnalysisStatus))
 		mux.HandleFunc("GET /api/v1/projects/{key}/analysis", rt.authz(userdom.PermView, rt.latestProjectAnalysis))
 	}

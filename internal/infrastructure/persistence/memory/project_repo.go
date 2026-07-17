@@ -89,6 +89,40 @@ func (r *ProjectRepository) GetByKey(_ context.Context, tenantID shared.ID, key 
 	return cloneProject(p), nil
 }
 
+func (r *ProjectRepository) GetByID(_ context.Context, tenantID, projectID shared.ID) (*project.Project, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.data {
+		if p.ID == projectID && (tenantID.IsZero() || p.TenantID == tenantID) {
+			return cloneProject(p), nil
+		}
+	}
+	return nil, shared.ErrNotFound
+}
+
+func (r *ProjectRepository) UpdateGate(_ context.Context, tenantID shared.ID, key, gateID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, found := r.data[projectStoreKey(tenantID, key)]
+	if !found {
+		return shared.ErrNotFound
+	}
+	p.GateID = gateID
+	return nil
+}
+
+func (r *ProjectRepository) CountByGate(_ context.Context, tenantID shared.ID, gateID string) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, p := range r.data {
+		if (tenantID.IsZero() || p.TenantID == tenantID) && p.GateID == gateID {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (r *ProjectRepository) DeleteByKey(_ context.Context, tenantID shared.ID, key string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -685,13 +685,19 @@ func runGate(args []string) error {
 		scoped = filterNewCode(findings, changed)
 	}
 
-	// 4. Ratings over the scope (security/reliability are worst-severity, so correctly new-code-scoped;
-	// maintainability's debt ratio still divides by whole-repo LOC) + whole-codebase duplication density.
+	// 4. Ratings over the scope + whole-codebase duplication density.
 	inv, err := codeinventory.New().Inventory(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("inventory: %w", err)
 	}
-	rep := rating.Compute(scoped, inv.Totals().CodeLines)
+	loc := inv.Totals().CodeLines
+	if newCodeOnly {
+		loc = 0
+		for _, lines := range changed {
+			loc += len(lines)
+		}
+	}
+	rep := rating.Compute(scoped, loc)
 	dupRep, err := duplication.New(0).Duplication(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("duplication: %w", err)
@@ -1096,6 +1102,7 @@ func run(path string, failOn shared.Severity, mode, priority string, ignoreUnfix
 		detectionSources,
 		risk.New(cfg.KEVURL, cfg.EPSSURL, nil), license.New(), licensemeta.NewChain(licensemeta.NewOSMetadata(), licensemeta.New(cfg.DepsDevURL, nil), licensemeta.NewPyPI("", nil)),
 	)
+	sca.SetGateDecoder(qualityprofile.LoadGateBytes)
 	sca.SetSBOMEnricher(manifest.New())
 	sca.SetMavenCoordResolver(mavencoord.New())   // recover real Maven coords from JAR pom.properties (offline) before license lookup
 	sca.SetJarChecksumResolver(jarchecksum.New()) // capture JAR artifact SHA-1 from the workspace (Syft omits it from CycloneDX)

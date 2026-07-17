@@ -71,6 +71,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/ownadvisory"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/ownsbom"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/pyimports"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/qualityprofile"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/risk"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/sast"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/secretscan"
@@ -109,6 +110,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 	projectuc "github.com/KKloudTarus/synapse-ce/internal/usecase/projectuc"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/pyreach"
+	qualitygatesuc "github.com/KKloudTarus/synapse-ce/internal/usecase/qualitygates"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/reachability"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/reachproof"
 	reconuc "github.com/KKloudTarus/synapse-ce/internal/usecase/recon"
@@ -171,6 +173,9 @@ func main() {
 	var importedSBOMStore ports.ImportedSBOMStore
 	var scanJobStore ports.ScanJobStore
 	var scanRunStore ports.ScanRunStore
+	var projectAnalysisStore ports.ProjectAnalysisStore
+	var qualityGateStore ports.QualityGateStore
+	var qualityGateMutator ports.QualityGateMutator
 	var reconRunStore ports.ReconRunStore
 	var evidenceStore ports.EvidenceStore
 	var advisoryStore ports.AdvisoryStore         // owned normalized-advisory store (global reference data, not tenant-scoped)
@@ -267,6 +272,8 @@ func main() {
 		importedSBOMStore = postgres.NewImportedSBOMStore(pool)
 		scanJobStore = postgres.NewScanJobStore(pool)
 		scanRunStore = postgres.NewScanRunStore(pool)
+		projectAnalysisStore = postgres.NewProjectAnalysisStore(pool)
+		qualityGateStore = postgres.NewQualityGateStore(pool)
 		reconRunStore = postgres.NewReconRunStore(pool)
 		evidenceStore = postgres.NewEvidenceStore(pool)
 		advisoryStore = postgres.NewAdvisoryRepository(pool)
@@ -275,6 +282,7 @@ func main() {
 		aupStore = postgres.NewAUPStore(pool)
 		pgAudit := postgres.NewAuditLog(pool)
 		auditLog, auditReader = pgAudit, pgAudit
+		qualityGateMutator = postgres.NewQualityGateMutator(pool)
 		timestampStore = postgres.NewTimestampStore(pool)
 		credVault = vault.NewPostgresVault(pool, vaultCipher)
 		reconQueue = postgres.NewJobQueue(pool, ids)
@@ -301,6 +309,8 @@ func main() {
 		importedSBOMStore = memory.NewImportedSBOMStore()
 		scanJobStore = memory.NewScanJobStore()
 		scanRunStore = memory.NewScanRunStore()
+		projectAnalysisStore = memory.NewProjectAnalysisStore()
+		qualityGateStore = memory.NewQualityGateStore()
 		reconRunStore = memory.NewReconRunRepository()
 		evidenceStore = memory.NewEvidenceStore()
 		advisoryStore = memory.NewAdvisoryStore()
@@ -309,6 +319,7 @@ func main() {
 		aupStore = file.NewAUPStore(cfg.AUPFile)
 		fileAudit := file.NewAuditLog(cfg.AuditFile)
 		auditLog, auditReader = fileAudit, fileAudit
+		qualityGateMutator = memory.NewQualityGateMutator(qualityGateStore.(*memory.QualityGateStore), projectRepo.(*memory.ProjectRepository), auditLog)
 		timestampStore = memory.NewTimestampStore()
 		credVault = vault.NewMemoryVault(vaultCipher, nil)
 		agentSessionStore = memory.NewAgentSessionStore()
@@ -332,6 +343,12 @@ func main() {
 	engService := enguc.NewService(repo, clock, ids, auditLog)
 	projectService := projectuc.NewService(projectRepo, repo, clock, ids, auditLog, !cfg.IsProduction())
 	projectService.SetArchiveStore(file.NewProjectArchiveStore(cfg.ProjectUploadDir, cfg.MaxWorkspaceBytes))
+	projectService.SetAnalysisStore(projectAnalysisStore)
+	projectService.SetFindingRepository(findingRepo)
+	qualityGateService := qualitygatesuc.NewService(qualityGateStore, auditLog, clock)
+	qualityGateService.SetMutator(qualityGateMutator)
+	projectService.SetQualityGates(qualityGateService)
+	projectService.SetQualityGateMutator(qualityGateMutator)
 	// Evidence artifact blob store: MinIO/S3 when configured, else in-memory (dev).
 	var blobStore ports.BlobStore
 	if cfg.BlobEndpoint != "" {
@@ -493,6 +510,7 @@ func main() {
 		detectionSources,
 		risk.New(cfg.KEVURL, cfg.EPSSURL, nil), license.New(), licensemeta.NewChain(licensemeta.NewOSMetadata(), licensemeta.New(cfg.DepsDevURL, nil), licensemeta.NewPyPI("", nil)))
 	scaService.SetImportedSBOMStore(importedSBOMStore)
+	scaService.SetGateDecoder(qualityprofile.LoadGateBytes)
 	scaService.SetSBOMEnricher(manifest.New())
 	scaService.SetMavenCoordResolver(mavencoord.New())   // recover real Maven coords from JAR pom.properties (offline) before license lookup
 	scaService.SetJarChecksumResolver(jarchecksum.New()) // capture JAR artifact SHA-1 from the workspace (Syft omits it from CycloneDX)
@@ -839,7 +857,9 @@ func main() {
 	}
 	router := httpapi.NewRouter(log, auth, engService, scaService, aupService, findingsService, exportService, reportService, evidenceService, reconService, logBroker, transferService, auditService, vexService, usersService, credentialsService)
 	projectService.SetScanner(scaService)
+	scaService.SetProjectAnalysisRecorder(projectService)
 	router.SetProjects(projectService)
+	router.SetQualityGates(qualityGateService)
 	router.SetExploitation(exploitationService) // evidence-gated finding verify endpoint
 	// Read-only code-quality dashboard. Server-side analysis is PURE-GO and memory-safe only (pattern
 	// rules + duplication + Go-parser inventory); tree-sitter complexity is intentionally NOT wired here

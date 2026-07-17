@@ -18,6 +18,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/judgment"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
@@ -42,7 +44,39 @@ type ProjectRepository interface {
 	Create(ctx context.Context, p *project.Project) error
 	List(ctx context.Context, tenantID shared.ID) ([]*project.Project, error)
 	GetByKey(ctx context.Context, tenantID shared.ID, key string) (*project.Project, error)
+	GetByID(ctx context.Context, tenantID, projectID shared.ID) (*project.Project, error)
+	UpdateGate(ctx context.Context, tenantID shared.ID, key, gateID string) error
+	CountByGate(ctx context.Context, tenantID shared.ID, gateID string) (int, error)
 	DeleteByKey(ctx context.Context, tenantID shared.ID, key string) error
+}
+
+// QualityGateStore persists tenant-scoped custom gate definitions.
+type QualityGateStore interface {
+	Create(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate) error
+	List(ctx context.Context, tenantID shared.ID) ([]qualitygate.Gate, error)
+	Get(ctx context.Context, tenantID shared.ID, key string) (qualitygate.Gate, error)
+	Update(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate) error
+	Delete(ctx context.Context, tenantID shared.ID, key string) error
+	DeleteIfUnassigned(ctx context.Context, tenantID shared.ID, key string) error
+}
+
+// QualityGateMutator coordinates managed-gate writes, audit records, and safe custom-gate Project references.
+type QualityGateMutator interface {
+	CreateGate(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate, audit AuditEntry) error
+	UpdateGate(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate, audit AuditEntry) error
+	DeleteGate(ctx context.Context, tenantID shared.ID, key string, audit AuditEntry) error
+	AssignProjectGate(ctx context.Context, tenantID shared.ID, projectKey, gateID string, audit AuditEntry) error
+	CreateProjectWithGate(ctx context.Context, p *project.Project) error
+}
+
+// ProjectAnalysisStore persists immutable, tenant-scoped Project analysis snapshots.
+type ProjectAnalysisStore interface {
+	Save(ctx context.Context, analysis projectanalysis.Analysis) error
+	SaveWithResult(ctx context.Context, analysis projectanalysis.Analysis, result []byte) error
+	LatestWithResult(ctx context.Context, tenantID, projectID shared.ID) (projectanalysis.Analysis, []byte, error)
+	LatestForProjects(ctx context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]projectanalysis.Analysis, error)
+	List(ctx context.Context, tenantID, projectID shared.ID, limit int, beforeCreatedAt time.Time, beforeID shared.ID) ([]projectanalysis.Analysis, bool, error)
+	Get(ctx context.Context, tenantID, projectID, analysisID shared.ID) (projectanalysis.Analysis, error)
 }
 
 // ProjectArchiveStore retains uploaded source archives so a Project can be re-analyzed.
@@ -71,6 +105,7 @@ type EngagementRepository interface {
 	// GetByProjectID loads the hidden Project analysis context scoped to tenantID.
 	// It is only for Project use-case internals; normal engagement reads must use GetByIDInTenant.
 	GetByProjectID(ctx context.Context, tenantID, projectID shared.ID) (*engagement.Engagement, error)
+	ProjectContexts(ctx context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]*engagement.Engagement, error)
 	List(ctx context.Context, tenantID shared.ID) ([]*engagement.Engagement, error)
 	// Update persists changes to an existing engagement aggregate – its row
 	// (name/client/status/authorization window/timezone) and its full scope target
@@ -252,8 +287,10 @@ type ScanJob struct {
 
 // ScanJobStore persists scan-job status (upserted as the pipeline progresses).
 type ScanJobStore interface {
+	CreateRunning(ctx context.Context, job ScanJob) error
 	Save(ctx context.Context, job ScanJob) error
 	LatestForEngagement(ctx context.Context, engagementID shared.ID) (ScanJob, error)
+	LatestForEngagements(ctx context.Context, engagementIDs []shared.ID) (map[shared.ID]ScanJob, error)
 	// GetJob returns a scan job by its own id (shared.ErrNotFound if absent). Used to
 	// finalize a SPECIFIC dead-lettered job rather than the engagement's latest, so a newer
 	// scan for the same engagement cannot mislead the dead-letter terminal-guard.
@@ -540,6 +577,7 @@ type AcquireRequest struct {
 // Cleanup, if set, removes any temporary resources and must be called when done.
 type Workspace struct {
 	Dir          string
+	Commit       string   // resolved Git HEAD for cloned sources; empty for local/archive/image targets
 	Lockfiles    []string // recognized lockfile basenames present (scan-completeness signal)
 	LocalModules []string // module paths declared in the repo (go.mod module, package.json name) – first-party identities
 	// UnresolvedEcosystems are build systems present in the repo whose dependencies
@@ -621,6 +659,9 @@ func (w *Workspace) Close() error {
 type Acquirer interface {
 	Acquire(ctx context.Context, req AcquireRequest) (*Workspace, error)
 }
+
+// GateDecoder parses a repository quality-gate document after SCA acquires its workspace.
+type GateDecoder func([]byte) (qualitygate.Gate, error)
 
 // ---- SCA tool ports (implemented by infrastructure/tools adapters) ----
 

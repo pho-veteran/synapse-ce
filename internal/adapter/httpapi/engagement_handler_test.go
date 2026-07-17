@@ -62,6 +62,15 @@ func (r *engRepoFake) GetByProjectID(_ context.Context, tenantID, projectID shar
 	}
 	return nil, shared.ErrNotFound
 }
+func (r *engRepoFake) ProjectContexts(_ context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]*engdom.Engagement, error) {
+	out := map[shared.ID]*engdom.Engagement{}
+	for _, id := range projectIDs {
+		if e, err := r.GetByProjectID(context.Background(), tenantID, id); err == nil {
+			out[id] = e
+		}
+	}
+	return out, nil
+}
 func (r *engRepoFake) List(context.Context, shared.ID) ([]*engdom.Engagement, error) { return nil, nil }
 
 type engIDs struct{}

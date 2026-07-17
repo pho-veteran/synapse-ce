@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
@@ -21,6 +22,24 @@ type ScanJobStore struct{ pool *pgxpool.Pool }
 func NewScanJobStore(pool *pgxpool.Pool) *ScanJobStore { return &ScanJobStore{pool: pool} }
 
 var _ ports.ScanJobStore = (*ScanJobStore)(nil)
+
+func (r *ScanJobStore) CreateRunning(ctx context.Context, j ports.ScanJob) error {
+	debugEvents, err := json.Marshal(j.DebugEvents)
+	if err != nil {
+		return fmt.Errorf("marshal scan job debug events: %w", err)
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO scan_jobs (id, engagement_id, target, kind, status, stage, progress, error, started_at, finished_at, debug_events)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		j.ID, j.EngagementID, j.Target, j.Kind, string(j.Status), j.Stage, j.Progress, j.Error, j.StartedAt, j.FinishedAt, debugEvents)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return shared.ErrConflict
+		}
+		return fmt.Errorf("create scan job: %w", err)
+	}
+	return nil
+}
 
 // Save upserts a scan job (used on create and on every stage/status update).
 func (r *ScanJobStore) Save(ctx context.Context, j ports.ScanJob) error {
@@ -103,6 +122,33 @@ func (r *ScanJobStore) GetJob(ctx context.Context, id string) (ports.ScanJob, er
 }
 
 // LatestForEngagement returns the engagement's most recent scan job, or ErrNotFound.
+func (r *ScanJobStore) LatestForEngagements(ctx context.Context, engagementIDs []shared.ID) (map[shared.ID]ports.ScanJob, error) {
+	ids := make([]string, len(engagementIDs))
+	for i, id := range engagementIDs {
+		ids[i] = id.String()
+	}
+	if len(ids) == 0 {
+		return map[shared.ID]ports.ScanJob{}, nil
+	}
+	rows, err := r.pool.Query(ctx, `SELECT DISTINCT ON (engagement_id) id, engagement_id, target, kind, status, stage, progress, COALESCE(error,''), started_at, finished_at FROM scan_jobs WHERE engagement_id = ANY($1) ORDER BY engagement_id, started_at DESC, id DESC`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list latest scan jobs: %w", err)
+	}
+	defer rows.Close()
+	out := map[shared.ID]ports.ScanJob{}
+	for rows.Next() {
+		var j ports.ScanJob
+		var status string
+		var finished *time.Time
+		if err := rows.Scan(&j.ID, &j.EngagementID, &j.Target, &j.Kind, &status, &j.Stage, &j.Progress, &j.Error, &j.StartedAt, &finished); err != nil {
+			return nil, fmt.Errorf("scan latest scan job: %w", err)
+		}
+		j.Status, j.FinishedAt, j.DebugEvents = ports.ScanStatus(status), finished, []ports.ScanDebugEvent{}
+		out[shared.ID(j.EngagementID)] = j
+	}
+	return out, rows.Err()
+}
+
 func (r *ScanJobStore) LatestForEngagement(ctx context.Context, engagementID shared.ID) (ports.ScanJob, error) {
 	var (
 		j           ports.ScanJob

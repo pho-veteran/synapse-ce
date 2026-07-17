@@ -197,12 +197,52 @@ func (a *Acquirer) acquireGit(ctx context.Context, url, ref string) (*ports.Work
 		}
 	}
 
+	commit, err := a.gitCommit(ctx, dir, url, gitEnv)
+	if err != nil {
+		_ = cleanup()
+		return nil, err
+	}
 	lockfiles, localModules, unresolved, err := inspectWorkspace(dir, a.maxWorkspaceBytes)
 	if err != nil {
 		_ = cleanup()
 		return nil, err
 	}
-	return &ports.Workspace{Dir: dir, Lockfiles: lockfiles, LocalModules: localModules, UnresolvedEcosystems: unresolved, Cleanup: cleanup}, nil
+	return &ports.Workspace{Dir: dir, Commit: commit, Lockfiles: lockfiles, LocalModules: localModules, UnresolvedEcosystems: unresolved, Cleanup: cleanup}, nil
+}
+
+var gitCommitRE = regexp.MustCompile(`^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$`)
+
+func (a *Acquirer) gitCommit(ctx context.Context, dir, url string, gitEnv []string) (string, error) {
+	var out []byte
+	if a.sandbox != nil {
+		host, err := gitHost(url)
+		if err != nil {
+			return "", err
+		}
+		egress, hostNet := a.sandboxNet([]string{host})
+		res, err := a.sandbox.Run(ctx, ports.ToolSpec{Name: "git", Args: []string{"rev-parse", "HEAD"}, Env: gitEnv, Workdir: dir, EgressPolicy: egress, HostNetwork: hostNet})
+		if err != nil {
+			return "", fmt.Errorf("git rev-parse (sandboxed) failed: %w", err)
+		}
+		if res.ExitCode != 0 {
+			return "", fmt.Errorf("git rev-parse failed: exit %d: %s", res.ExitCode, truncate(redactCreds(string(res.Stdout)+string(res.Stderr)), 400))
+		}
+		out = res.Stdout
+	} else {
+		cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), gitEnv...)
+		var err error
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("git rev-parse failed: %w: %s", err, truncate(redactCreds(string(out)), 400))
+		}
+	}
+	commit := strings.TrimSpace(string(out))
+	if !gitCommitRE.MatchString(commit) {
+		return "", fmt.Errorf("git rev-parse returned an invalid commit")
+	}
+	return commit, nil
 }
 
 // rejectInternalAcquisitionHost refuses an acquisition target whose host resolves to a

@@ -4,7 +4,11 @@
 // conditions that failed, so a CI step can print an actionable reason.
 package qualitygate
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
 
 // Op is a comparison operator for a condition.
 type Op string
@@ -24,9 +28,12 @@ type Condition struct {
 	Threshold float64 `yaml:"threshold" json:"threshold"`
 }
 
-// Gate is a set of conditions; all must hold for the gate to pass.
+// Gate is a named set of conditions; all must hold for the gate to pass.
 type Gate struct {
+	Key        string      `yaml:"key,omitempty" json:"key,omitempty"`
+	Name       string      `yaml:"name,omitempty" json:"name,omitempty"`
 	Conditions []Condition `yaml:"conditions" json:"conditions"`
+	BuiltIn    bool        `yaml:"-" json:"built_in,omitempty"`
 }
 
 // Snapshot is the measured metric values. A metric absent from the snapshot reads as 0.
@@ -34,6 +41,54 @@ type Snapshot map[string]float64
 
 // validOps is the set of operators a condition may use.
 var validOps = map[Op]bool{OpLE: true, OpGE: true, OpEQ: true, OpLT: true, OpGT: true}
+var keyPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+// Normalize validates and normalizes a managed custom gate.
+func (g Gate) Normalize() (Gate, error) {
+	g.Key, g.Name = strings.TrimSpace(g.Key), strings.TrimSpace(g.Name)
+	if !keyPattern.MatchString(g.Key) {
+		return Gate{}, fmt.Errorf("quality gate key must be a lowercase hyphenated slug")
+	}
+	if g.Name == "" {
+		return Gate{}, fmt.Errorf("quality gate name is required")
+	}
+	g.BuiltIn = false
+	if err := g.Validate(); err != nil {
+		return Gate{}, err
+	}
+	return g, nil
+}
+
+// Clone returns an independent copy of a gate.
+func (g Gate) Clone() Gate {
+	g.Conditions = append([]Condition(nil), g.Conditions...)
+	return g
+}
+
+// BuiltIns returns the managed built-in gate definitions.
+func BuiltIns() []Gate { return []Gate{Default()} }
+
+// Resolve returns a built-in gate by key.
+func Resolve(key string) (Gate, bool) {
+	key = strings.TrimSpace(key)
+	for _, gate := range BuiltIns() {
+		if gate.Key == key {
+			return gate, true
+		}
+	}
+	return Gate{}, false
+}
+
+// DefaultKey is the key assigned to projects that use the built-in gate.
+const DefaultKey = "synapse-way"
+
+// Effective returns the built-in default for an empty key, or a named built-in gate.
+func Effective(key string) (Gate, bool) {
+	if strings.TrimSpace(key) == "" {
+		return Default(), true
+	}
+	return Resolve(key)
+}
 
 // Validate rejects a gate that is empty or references an unknown metric/operator, so a typo'd or
 // truncated config fails loud at load time rather than silently passing (a security gate must fail

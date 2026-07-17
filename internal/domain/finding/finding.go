@@ -196,6 +196,14 @@ func (f *Finding) CanPromote() bool {
 	return true
 }
 
+// Identity returns the stable key used to associate a finding across scans.
+func Identity(f Finding) string {
+	if key := strings.TrimSpace(f.DedupKey); key != "" {
+		return key
+	}
+	return strings.TrimSpace(f.ID.String())
+}
+
 // Publishable filters a finding slice to those that may appear in a customer-facing
 // deliverable, applying the deterministic evidence gate via CanPromote.
 // It is the SINGLE rule every client-facing reader funnels through – directly, or via

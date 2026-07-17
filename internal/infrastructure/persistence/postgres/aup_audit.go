@@ -134,13 +134,9 @@ func (l *AuditLog) Verify(ctx context.Context) (audit.Report, error) {
 // and re-chains (bounded), parity with the evidence store, rather than surfacing an opaque
 // error. On the normal locked path the conflict is unreachable and the loop runs once.
 func (l *AuditLog) Record(ctx context.Context, e ports.AuditEntry) error {
-	meta, err := json.Marshal(e.Metadata)
-	if err != nil {
-		return fmt.Errorf("marshal audit metadata: %w", err)
-	}
 	const maxAttempts = 8
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		err := l.recordOnce(ctx, e, meta)
+		err := l.recordOnce(ctx, e)
 		if err == nil {
 			return nil
 		}
@@ -155,13 +151,27 @@ func (l *AuditLog) Record(ctx context.Context, e ports.AuditEntry) error {
 
 // recordOnce performs one locked read-head → chain → insert attempt. A 23505 unique violation
 // propagates (wrapped) so Record can retry.
-func (l *AuditLog) recordOnce(ctx context.Context, e ports.AuditEntry, meta []byte) error {
+func (l *AuditLog) recordOnce(ctx context.Context, e ports.AuditEntry) error {
 	tx, err := l.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("audit tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := appendAudit(ctx, tx, e); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("audit commit: %w", err)
+	}
+	return nil
+}
 
+// appendAudit extends the audit chain within an existing transaction.
+func appendAudit(ctx context.Context, tx pgx.Tx, e ports.AuditEntry) error {
+	meta, err := json.Marshal(e.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal audit metadata: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(auditChainLock)); err != nil {
 		return fmt.Errorf("audit lock: %w", err)
 	}
@@ -175,7 +185,6 @@ func (l *AuditLog) recordOnce(ctx context.Context, e ports.AuditEntry, meta []by
 		prevHash = *prev
 	}
 	hash := audit.ComputeHash(prevHash, e.Actor, e.Action, e.Target, e.Metadata, e.At)
-
 	// tenant_id '' = default tenant, matching the other writers. Audit reads are gated to the
 	// review capability since the log is global; populating this row's tenant_id from the
 	// authenticated context + per-tenant audit scoping is a remaining row-level follow-up.
@@ -184,9 +193,6 @@ func (l *AuditLog) recordOnce(ctx context.Context, e ports.AuditEntry, meta []by
 		 VALUES ('', $1, $2, $3, $4, $5, $6, $7)`,
 		e.Actor, e.Action, e.Target, string(meta), e.At, hash, prevHash); err != nil {
 		return fmt.Errorf("insert audit: %w", err) // 23505 propagates for Record's retry
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("audit commit: %w", err)
 	}
 	return nil
 }

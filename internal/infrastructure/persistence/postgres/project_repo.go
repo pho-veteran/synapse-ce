@@ -26,6 +26,14 @@ func NewProjectRepository(pool *pgxpool.Pool) *ProjectRepository {
 var _ ports.ProjectRepository = (*ProjectRepository)(nil)
 
 func (r *ProjectRepository) Create(ctx context.Context, p *project.Project) error {
+	return insertProject(ctx, r.pool, p)
+}
+
+type projectExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func insertProject(ctx context.Context, execer projectExecer, p *project.Project) error {
 	source, err := json.Marshal(p.SourceBinding)
 	if err != nil {
 		return fmt.Errorf("marshal project source: %w", err)
@@ -34,7 +42,7 @@ func (r *ProjectRepository) Create(ctx context.Context, p *project.Project) erro
 	if err != nil {
 		return fmt.Errorf("marshal project profiles: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `INSERT INTO projects (`+projectCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+	_, err = execer.Exec(ctx, `INSERT INTO projects (`+projectCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		p.ID.String(), p.TenantID.String(), p.Name, p.Key, source, profiles, p.GateID,
 		p.Audit.CreatedAt, p.Audit.UpdatedAt, p.Audit.CreatedBy, p.Audit.UpdatedBy)
 	if err != nil {
@@ -87,6 +95,42 @@ func (r *ProjectRepository) GetByKey(ctx context.Context, tenantID shared.ID, ke
 		return nil, fmt.Errorf("select project: %w", err)
 	}
 	return p, nil
+}
+
+func (r *ProjectRepository) GetByID(ctx context.Context, tenantID, projectID shared.ID) (*project.Project, error) {
+	var row pgx.Row
+	if tenantID.IsZero() {
+		row = r.pool.QueryRow(ctx, `SELECT `+projectCols+` FROM projects WHERE id=$1`, projectID.String())
+	} else {
+		row = r.pool.QueryRow(ctx, `SELECT `+projectCols+` FROM projects WHERE tenant_id=$1 AND id=$2`, tenantID.String(), projectID.String())
+	}
+	p, err := scanProject(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, shared.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select project: %w", err)
+	}
+	return p, nil
+}
+
+func (r *ProjectRepository) UpdateGate(ctx context.Context, tenantID shared.ID, key, gateID string) error {
+	ct, err := r.pool.Exec(ctx, `UPDATE projects SET gate_id=$3, updated_at=now() WHERE tenant_id=$1 AND key=$2`, tenantID.String(), key, gateID)
+	if err != nil {
+		return fmt.Errorf("update project gate: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return shared.ErrNotFound
+	}
+	return nil
+}
+
+func (r *ProjectRepository) CountByGate(ctx context.Context, tenantID shared.ID, gateID string) (int, error) {
+	var n int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM projects WHERE tenant_id=$1 AND gate_id=$2`, tenantID.String(), gateID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count projects by gate: %w", err)
+	}
+	return n, nil
 }
 
 func (r *ProjectRepository) DeleteByKey(ctx context.Context, tenantID shared.ID, key string) error {

@@ -601,12 +601,28 @@ export interface Project {
   defaultProfileByLang: Record<string, string>
   gateId: string
   createdAt: string | null
+  latestAnalysis: ProjectAnalysis | null
+  latestJob: ScanJob | null
 }
 
 export interface CreateProjectInput {
   name: string
   key: string
   sourceBinding: ProjectSourceBinding
+  gateId?: string
+}
+
+export interface QualityGateCondition {
+  metric: string
+  op: '<=' | '>=' | '==' | '<' | '>'
+  threshold: number
+}
+
+export interface QualityGate {
+  key: string
+  name: string
+  conditions: QualityGateCondition[]
+  builtIn: boolean
 }
 
 export interface LanguageInventory {
@@ -637,7 +653,7 @@ export interface DuplicationSummary {
   files: number
 }
 
-export type Grade = 'A' | 'B' | 'C' | 'D' | 'E'
+export type Grade = 'A' | 'B' | 'C' | 'D' | 'E' | '?'
 
 export interface CodeRating {
   security: Grade
@@ -659,6 +675,61 @@ export interface CodeQualityView {
   available: boolean
   reason?: string
   report?: CodeQualityReport
+}
+
+export interface ProjectIssueCounts {
+  total: number
+  byKind: Record<string, number>
+  bySeverity: Record<string, number>
+  byStatus: Record<string, number>
+}
+
+export interface ProjectGateCondition {
+  condition: { metric: string; op: string; threshold: number }
+  actual: number
+  passed: boolean
+}
+
+export interface ProjectGateResult {
+  passed: boolean
+  results: ProjectGateCondition[]
+}
+
+export interface ProjectGateInfo {
+  key: string
+  name: string
+  source: 'managed' | 'repository' | 'default' | ''
+}
+
+export interface ProjectAnalysis {
+  id: string
+  createdAt: string
+  sourceRef: string
+  sourceCommit: string
+  gate: ProjectGateResult
+  gateInfo: ProjectGateInfo
+  issues: ProjectIssueCounts
+  newCode: { previousId: string; counts: ProjectIssueCounts; rating: { security: Grade; reliability: Grade; maintainability: Grade | null } }
+  delta: { issues: ProjectIssueCounts; measures: Record<string, number>; ratings: Record<string, number> } | null
+  measures: Record<string, number>
+  coverage: { coveredLines: number; totalLines: number } | null
+  duplication: DuplicationSummary
+  rating: CodeRating
+}
+
+export interface ProjectAnalysisCursor {
+  beforeCreatedAt: string
+  beforeId: string
+}
+
+export interface ProjectAnalysisPage {
+  items: ProjectAnalysis[]
+  next: ProjectAnalysisCursor | null
+}
+
+export interface LatestProjectAnalysis {
+  analysis: ProjectAnalysis
+  result: ScanResult
 }
 
 // --- Rules API ---

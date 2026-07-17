@@ -36,7 +36,7 @@ func ValidMetric(name string) bool { return knownMetrics[name] }
 // A ratings on the whole codebase. It mirrors the widely used default of gating strictly on new code
 // while holding overall ratings at their best. Override with a .synapse-gate.yaml.
 func Default() Gate {
-	return Gate{Conditions: []Condition{
+	return Gate{Key: "synapse-way", Name: "Synapse way", BuiltIn: true, Conditions: []Condition{
 		{Metric: MetricNewCritical, Op: OpLE, Threshold: 0},
 		{Metric: MetricNewHigh, Op: OpLE, Threshold: 0},
 		{Metric: MetricNewSecret, Op: OpLE, Threshold: 0},

@@ -25,6 +25,19 @@ func NewScanJobStore() *ScanJobStore {
 
 var _ ports.ScanJobStore = (*ScanJobStore)(nil)
 
+func (s *ScanJobStore) CreateRunning(_ context.Context, j ports.ScanJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, current := range s.byID {
+		if current.EngagementID == j.EngagementID && current.Status == ports.ScanRunning {
+			return shared.ErrConflict
+		}
+	}
+	s.byID[j.ID] = j
+	s.latest[shared.ID(j.EngagementID)] = j.ID
+	return nil
+}
+
 // Save upserts a job; a newly-seen id becomes the latest for its engagement.
 func (s *ScanJobStore) Save(_ context.Context, j ports.ScanJob) error {
 	s.mu.Lock()
@@ -74,4 +87,16 @@ func (s *ScanJobStore) LatestForEngagement(_ context.Context, engagementID share
 		return ports.ScanJob{}, fmt.Errorf("scan job for %s: %w", engagementID, shared.ErrNotFound)
 	}
 	return s.byID[id], nil
+}
+
+func (s *ScanJobStore) LatestForEngagements(_ context.Context, engagementIDs []shared.ID) (map[shared.ID]ports.ScanJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := map[shared.ID]ports.ScanJob{}
+	for _, engagementID := range engagementIDs {
+		if id, ok := s.latest[engagementID]; ok {
+			out[engagementID] = s.byID[id]
+		}
+	}
+	return out, nil
 }

@@ -6,10 +6,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/memory"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
+	qualitygatesuc "github.com/KKloudTarus/synapse-ce/internal/usecase/qualitygates"
+	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
 )
 
 type fixedClock struct{ now time.Time }
@@ -53,6 +59,29 @@ func TestServiceCRUDAndAudit(t *testing.T) {
 	}
 }
 
+func TestListSummariesIncludesLatestAnalysis(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	svc := NewService(projects, engagements, fixedClock{time.Unix(1, 0)}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analyses.Save(ctx, projectanalysis.Analysis{ID: "analysis-1", TenantID: "tenant", ProjectID: p.ID.String(), CreatedAt: time.Unix(2, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := svc.ListSummaries(ctx, "tenant")
+	if err != nil || len(summaries) != 1 || summaries[0].LatestAnalysis == nil || summaries[0].LatestAnalysis.ID != "analysis-1" || summaries[0].LatestJob != nil {
+		t.Fatalf("summaries=%+v err=%v", summaries, err)
+	}
+	if other, err := svc.ListSummaries(ctx, "other"); err != nil || len(other) != 0 {
+		t.Fatalf("other=%+v err=%v", other, err)
+	}
+}
+
 func TestServiceRequiresActor(t *testing.T) {
 	svc := NewService(memory.NewProjectRepository(), memory.NewEngagementRepository(), fixedClock{}, fixedIDs{}, &captureAudit{}, true)
 	if _, err := svc.Create(context.Background(), CreateInput{Name: "P", Key: "p", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}}); !errors.Is(err, shared.ErrValidation) {
@@ -68,5 +97,179 @@ func TestServiceRejectsLocalSourceOutsideDevelopment(t *testing.T) {
 	})
 	if !errors.Is(err, shared.ErrValidation) {
 		t.Fatalf("got %v, want validation", err)
+	}
+}
+
+func TestServiceCreatesBuiltInGateWithoutStoredRow(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(memory.NewProjectRepository(), memory.NewEngagementRepository(), fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", GateID: qualitygate.DefaultKey, SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.GateID != qualitygate.DefaultKey {
+		t.Fatalf("gate=%q, want %q", p.GateID, qualitygate.DefaultKey)
+	}
+}
+
+func TestServiceCreateRejectsMissingCustomGate(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	svc := NewService(projects, memory.NewEngagementRepository(), fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetQualityGateMutator(memory.NewQualityGateMutator(memory.NewQualityGateStore(), projects, &captureAudit{}))
+	_, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", GateID: "release", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("create with missing gate=%v, want not found", err)
+	}
+	if _, err := projects.GetByKey(ctx, "tenant", "project"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("project after failed create=%v, want not found", err)
+	}
+}
+
+func TestServiceCreateWithCustomGateBlocksDeletion(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	gates := memory.NewQualityGateStore()
+	audit := &captureAudit{}
+	mutator := memory.NewQualityGateMutator(gates, projects, audit)
+	gateService := qualitygatesuc.NewService(gates, audit, fixedClock{})
+	gateService.SetMutator(mutator)
+	if _, err := gateService.Create(ctx, "alice", "tenant", qualitygate.Gate{Key: "release", Name: "Release", Conditions: []qualitygate.Condition{{Metric: qualitygate.MetricNewHigh, Op: qualitygate.OpLE, Threshold: 0}}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(projects, memory.NewEngagementRepository(), fixedClock{}, fixedIDs{}, audit, true)
+	svc.SetQualityGateMutator(mutator)
+	if _, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", GateID: "release", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateService.Delete(ctx, "alice", "tenant", "release"); !errors.Is(err, shared.ErrConflict) {
+		t.Fatalf("delete assigned custom gate=%v, want conflict", err)
+	}
+}
+
+func TestRecordProjectAnalysisUsesAssignedGate(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	audit := &captureAudit{}
+	svc := NewService(projects, engagements, fixedClock{}, fixedIDs{}, audit, true)
+	svc.SetAnalysisStore(analyses)
+	gates := memory.NewQualityGateStore()
+	mutator := memory.NewQualityGateMutator(gates, projects, audit)
+	gateService := qualitygatesuc.NewService(gates, audit, fixedClock{})
+	gateService.SetMutator(mutator)
+	svc.SetQualityGates(gateService)
+	svc.SetQualityGateMutator(mutator)
+	if _, err := svc.gates.Create(ctx, "alice", "tenant", qualitygate.Gate{Key: "relaxed", Name: "Relaxed", Conditions: []qualitygate.Condition{{Metric: qualitygate.MetricNewHigh, Op: qualitygate.OpLE, Threshold: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", GateID: "relaxed", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := engagements.GetByProjectID(ctx, p.TenantID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RecordProjectAnalysis(ctx, e.ID, "job-1", time.Unix(1, 0), &scauc.ScanResult{Findings: []finding.Finding{{ID: "high", DedupKey: "high", Kind: finding.KindSCA, Severity: shared.SeverityHigh, Status: finding.StatusOpen}}}); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil || len(list) != 1 || !list[0].Gate.Passed || len(list[0].Gate.Results) != 1 {
+		t.Fatalf("analysis=%+v err=%v", list, err)
+	}
+	if list[0].GateInfo.Key != "relaxed" || list[0].GateInfo.Name != "Relaxed" || list[0].GateInfo.Source != "managed" {
+		t.Fatalf("gate info=%+v", list[0].GateInfo)
+	}
+}
+
+func TestRecordProjectAnalysisUsesRepositoryGate(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	svc := NewService(projects, engagements, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := engagements.GetByProjectID(ctx, p.TenantID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := qualitygate.Gate{Key: "repo", Name: "Repository gate", Conditions: []qualitygate.Condition{{Metric: qualitygate.MetricNewHigh, Op: qualitygate.OpLE, Threshold: 0}}}
+	if err := svc.RecordProjectAnalysis(ctx, e.ID, "job-1", time.Unix(1, 0), &scauc.ScanResult{Gate: gate}); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil || len(list) != 1 || list[0].GateInfo.Source != "repository" || list[0].GateInfo.Key != "repo" {
+		t.Fatalf("analysis=%+v err=%v", list, err)
+	}
+}
+
+func TestRecordProjectAnalysisPersistsLineCoverage(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	svc := NewService(projects, engagements, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := engagements.GetByProjectID(ctx, p.TenantID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage := &measure.CoverageReport{Files: []measure.FileCoverage{{File: "a.go", CoveredLines: 1, TotalLines: 2}}, CoveredLines: 1, TotalLines: 2}
+	if err := svc.RecordProjectAnalysis(ctx, e.ID, "job-1", time.Unix(1, 0), &scauc.ScanResult{LineCoverage: coverage}); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil || len(list) != 1 || list[0].Coverage == nil || list[0].Coverage.Percent() != 50 || list[0].Measures[qualitygate.MetricCoveragePct] != 50 {
+		t.Fatalf("analysis=%+v err=%v", list, err)
+	}
+}
+
+func TestRecordProjectAnalysisHydratesCurrentTriageOnly(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	findings := memory.NewFindingRepository()
+	svc := NewService(projects, engagements, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	svc.SetFindingRepository(findings)
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant-a", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := engagements.GetByProjectID(ctx, p.TenantID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := []finding.Finding{
+		{ID: "current-id", EngagementID: e.ID, DedupKey: "current", Status: finding.StatusFalsePos, Severity: shared.SeverityHigh, Kind: finding.KindSCA},
+		{ID: "stale-id", EngagementID: e.ID, DedupKey: "stale", Status: finding.StatusRemediated, Severity: shared.SeverityCritical, Kind: finding.KindSCA},
+	}
+	if err := findings.Upsert(ctx, persisted); err != nil {
+		t.Fatal(err)
+	}
+	result := &scauc.ScanResult{Findings: []finding.Finding{{ID: "new-id", EngagementID: e.ID, DedupKey: "current", Status: finding.StatusOpen, Severity: shared.SeverityHigh, Kind: finding.KindSCA}}}
+	if err := svc.RecordProjectAnalysis(ctx, e.ID, "job-1", time.Unix(1, 0), result); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list=%+v err=%v", list, err)
+	}
+	if got := list[0].Issues.ByStatus[string(finding.StatusFalsePos)]; got != 1 {
+		t.Fatalf("false-positive count=%d, want 1", got)
+	}
+	if list[0].Issues.Total != 1 || len(list[0].InternalIssues) != 1 || list[0].InternalIssues[0].Key != "current" {
+		t.Fatalf("stale finding leaked into snapshot: %+v", list[0])
 	}
 }
