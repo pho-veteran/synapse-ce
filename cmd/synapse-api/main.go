@@ -109,6 +109,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 	projectuc "github.com/KKloudTarus/synapse-ce/internal/usecase/projectuc"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/pyreach"
+	qualitygatesuc "github.com/KKloudTarus/synapse-ce/internal/usecase/qualitygates"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/reachability"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/reachproof"
 	reconuc "github.com/KKloudTarus/synapse-ce/internal/usecase/recon"
@@ -171,6 +172,8 @@ func main() {
 	var importedSBOMStore ports.ImportedSBOMStore
 	var scanJobStore ports.ScanJobStore
 	var scanRunStore ports.ScanRunStore
+	var projectAnalysisStore ports.ProjectAnalysisStore
+	var qualityGateStore ports.QualityGateStore
 	var reconRunStore ports.ReconRunStore
 	var evidenceStore ports.EvidenceStore
 	var advisoryStore ports.AdvisoryStore         // owned normalized-advisory store (global reference data, not tenant-scoped)
@@ -267,6 +270,8 @@ func main() {
 		importedSBOMStore = postgres.NewImportedSBOMStore(pool)
 		scanJobStore = postgres.NewScanJobStore(pool)
 		scanRunStore = postgres.NewScanRunStore(pool)
+		projectAnalysisStore = postgres.NewProjectAnalysisStore(pool)
+		qualityGateStore = postgres.NewQualityGateStore(pool)
 		reconRunStore = postgres.NewReconRunStore(pool)
 		evidenceStore = postgres.NewEvidenceStore(pool)
 		advisoryStore = postgres.NewAdvisoryRepository(pool)
@@ -301,6 +306,8 @@ func main() {
 		importedSBOMStore = memory.NewImportedSBOMStore()
 		scanJobStore = memory.NewScanJobStore()
 		scanRunStore = memory.NewScanRunStore()
+		projectAnalysisStore = memory.NewProjectAnalysisStore()
+		qualityGateStore = memory.NewQualityGateStore()
 		reconRunStore = memory.NewReconRunRepository()
 		evidenceStore = memory.NewEvidenceStore()
 		advisoryStore = memory.NewAdvisoryStore()
@@ -332,6 +339,10 @@ func main() {
 	engService := enguc.NewService(repo, clock, ids, auditLog)
 	projectService := projectuc.NewService(projectRepo, repo, clock, ids, auditLog, !cfg.IsProduction())
 	projectService.SetArchiveStore(file.NewProjectArchiveStore(cfg.ProjectUploadDir, cfg.MaxWorkspaceBytes))
+	projectService.SetAnalysisStore(projectAnalysisStore)
+	projectService.SetFindingRepository(findingRepo)
+	qualityGateService := qualitygatesuc.NewService(qualityGateStore, auditLog, clock)
+	projectService.SetQualityGates(qualityGateService)
 	// Evidence artifact blob store: MinIO/S3 when configured, else in-memory (dev).
 	var blobStore ports.BlobStore
 	if cfg.BlobEndpoint != "" {
@@ -839,7 +850,9 @@ func main() {
 	}
 	router := httpapi.NewRouter(log, auth, engService, scaService, aupService, findingsService, exportService, reportService, evidenceService, reconService, logBroker, transferService, auditService, vexService, usersService, credentialsService)
 	projectService.SetScanner(scaService)
+	scaService.SetProjectAnalysisRecorder(projectService)
 	router.SetProjects(projectService)
+	router.SetQualityGates(qualityGateService)
 	router.SetExploitation(exploitationService) // evidence-gated finding verify endpoint
 	// Read-only code-quality dashboard. Server-side analysis is PURE-GO and memory-safe only (pattern
 	// rules + duplication + Go-parser inventory); tree-sitter complexity is intentionally NOT wired here

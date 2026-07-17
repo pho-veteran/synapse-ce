@@ -13,6 +13,7 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/evidence"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/vulnerability"
@@ -707,6 +708,18 @@ func newAsyncSvc(repo ports.EngagementRepository, clk ports.Clock, acq ports.Acq
 	return NewService(repo, nil, nil, nil, jobs, nil, nil, ids, ports.Provenance{}, clk, audit, shared.SeverityHigh, 0, acq, det, fakeSBOM{}, []ports.DetectionSource{fakeVuln{}}, nil, fakeLic{}, nil)
 }
 
+type contextRecorder struct {
+	called bool
+	live   bool
+	err    error
+}
+
+func (r *contextRecorder) RecordProjectAnalysis(ctx context.Context, _ shared.ID, _ string, _ time.Time, _ *ScanResult) error {
+	r.called = true
+	r.live = ctx.Err() == nil
+	return r.err
+}
+
 func TestStartScanAsyncCompletes(t *testing.T) {
 	repo := &fakeEngRepo{eng: engagementWithScope(t, "myrepo")}
 	acq := &fakeAcquirer{dir: "/tmp/ws"}
@@ -755,6 +768,61 @@ func TestStartScanAsyncCompletes(t *testing.T) {
 // TestFailStrandedScanJobFinalizes covers the SCA DeadLetterer hook: a dead-lettered scan job
 // drives its backing ScanJob to a terminal failed state (parity with recon + agent), instead of
 // leaving it stuck `running` with no result. Idempotent / no-op once terminal.
+func TestProjectRecorderUsesFreshCompletionContext(t *testing.T) {
+	repo := &fakeEngRepo{eng: engagementWithScope(t, "myrepo")}
+	jobs := newFakeJobStore()
+	svc := newAsyncSvc(repo, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: "/tmp/ws"}, &fakeAudit{}, &fakeDetector{}, jobs, fakeIDs{})
+	recorder := &contextRecorder{}
+	svc.SetProjectAnalysisRecorder(recorder)
+	job := ports.ScanJob{ID: "job-1", EngagementID: "e1", Status: ports.ScanRunning, StartedAt: time.Unix(0, 0).UTC()}
+
+	svc.runScanJob("operator", "e1", time.Unix(0, 0).UTC(), ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull}, job)
+
+	final, err := jobs.LatestForEngagement(context.Background(), "e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recorder.called || !recorder.live {
+		t.Fatalf("recorder called=%v live=%v, want live completion context", recorder.called, recorder.live)
+	}
+	if final.Status != ports.ScanSucceeded {
+		t.Fatalf("status=%q err=%q, want succeeded", final.Status, final.Error)
+	}
+}
+
+func TestProjectRecorderFailureFailsJob(t *testing.T) {
+	repo := &fakeEngRepo{eng: engagementWithScope(t, "myrepo")}
+	jobs := newFakeJobStore()
+	svc := newAsyncSvc(repo, fakeClock{t: time.Unix(0, 0).UTC()}, &fakeAcquirer{dir: "/tmp/ws"}, &fakeAudit{}, &fakeDetector{}, jobs, fakeIDs{})
+	svc.SetProjectAnalysisRecorder(&contextRecorder{err: errors.New("snapshot unavailable")})
+	job := ports.ScanJob{ID: "job-1", EngagementID: "e1", Status: ports.ScanRunning, StartedAt: time.Unix(0, 0).UTC()}
+
+	svc.runScanJob("operator", "e1", time.Unix(0, 0).UTC(), ports.AcquireRequest{Kind: "local", Value: "myrepo"}, ScanOptions{Mode: ScanModeFull}, job)
+
+	final, err := jobs.LatestForEngagement(context.Background(), "e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != ports.ScanFailed || !strings.Contains(final.Error, "snapshot unavailable") {
+		t.Fatalf("status=%q err=%q, want snapshot failure", final.Status, final.Error)
+	}
+}
+
+func TestLineCoverageSurvivesQueuedScanOptions(t *testing.T) {
+	options := ScanOptions{Mode: ScanModeFull, LineCoverage: &measure.CoverageReport{Files: []measure.FileCoverage{{File: "a.go", CoveredLines: 1, TotalLines: 2}}, CoveredLines: 1, TotalLines: 2}}
+	payload, err := json.Marshal(scaJobPayload{Actor: "operator", EngagementID: "e1", Options: options})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded scaJobPayload
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Options.LineCoverage == nil || decoded.Options.LineCoverage.Percent() != 50 {
+		t.Fatalf("coverage lost in payload: %+v", decoded.Options.LineCoverage)
+	}
+}
+
 func TestFailStrandedScanJobFinalizes(t *testing.T) {
 	jobs := newFakeJobStore()
 	svc := newAsyncSvc(&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, fakeClock{t: time.Unix(100, 0).UTC()}, &fakeAcquirer{dir: "/tmp/ws"}, &fakeAudit{}, &fakeDetector{}, jobs, fakeIDs{})

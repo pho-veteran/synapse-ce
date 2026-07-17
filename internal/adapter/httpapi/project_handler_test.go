@@ -1,14 +1,18 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/memory"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -23,6 +27,80 @@ type projectAnalysisServiceStub struct {
 
 func (s projectAnalysisServiceStub) LatestAnalysis(context.Context, shared.ID, string) ([]byte, error) {
 	return s.data, s.err
+}
+
+type coverageStartStub struct {
+	projectService
+	received *measure.CoverageReport
+}
+
+func (s *coverageStartStub) StartAnalysis(_ context.Context, _ string, _ shared.ID, _ string, coverage *measure.CoverageReport) (ports.ScanJob, error) {
+	s.received = coverage
+	return ports.ScanJob{ID: "job-1"}, nil
+}
+
+func TestParseCoverageUpload(t *testing.T) {
+	for _, data := range []string{
+		"SF:a.go\nDA:1,1\nend_of_record\n",
+		`<coverage><packages><package><classes><class filename="a.go"><lines><line number="1" hits="1"/></lines></class></classes></package></packages></coverage>`,
+		`<report><package name="pkg"><sourcefile name="A.java"><line nr="1" mi="0" ci="1"/></sourcefile></package></report>`,
+	} {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("coverage", "coverage")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		report, err := parseCoverageUpload(httptest.NewRecorder(), req)
+		if err != nil || report == nil || report.TotalLines != 1 {
+			t.Fatalf("report=%+v err=%v", report, err)
+		}
+	}
+}
+
+func TestStartProjectAnalysisRejectsInvalidCoverage(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("coverage", "coverage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("not a report"))
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stub := &coverageStartStub{}
+	rt := &Router{log: discardLog(), projects: stub}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/project/analyses", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.SetPathValue("key", "project")
+	req = req.WithContext(context.WithValue(req.Context(), principalKey, Principal{ID: "alice", TenantID: "tenant"}))
+	rec := httptest.NewRecorder()
+	rt.startProjectAnalysis(rec, req)
+	if rec.Code != http.StatusBadRequest || stub.received != nil {
+		t.Fatalf("code=%d coverage=%+v body=%s", rec.Code, stub.received, rec.Body.String())
+	}
+}
+
+func TestStartProjectAnalysisKeepsEmptyPostCompatible(t *testing.T) {
+	stub := &coverageStartStub{}
+	rt := &Router{log: discardLog(), projects: stub}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/project/analyses", nil)
+	req.SetPathValue("key", "project")
+	req = req.WithContext(context.WithValue(req.Context(), principalKey, Principal{ID: "alice", TenantID: "tenant"}))
+	rec := httptest.NewRecorder()
+	rt.startProjectAnalysis(rec, req)
+	if rec.Code != http.StatusAccepted || stub.received != nil {
+		t.Fatalf("code=%d coverage=%+v body=%s", rec.Code, stub.received, rec.Body.String())
+	}
 }
 
 func TestProjectAnalysisJobHidesInternalEngagement(t *testing.T) {
@@ -80,6 +158,20 @@ func TestLatestProjectAnalysisRejectsMalformedCache(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "must-not-leak") {
 		t.Fatalf("malformed cache leaked payload: %s", rec.Body.String())
+	}
+}
+
+func TestProjectAnalysisPageParams(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/p/analyses?limit=10&before_created_at=2026-07-17T00:00:00Z&before_id=a1", nil)
+	limit, before, id, err := projectAnalysisPageParams(req)
+	if err != nil || limit != 10 || before.IsZero() || id != "a1" {
+		t.Fatalf("limit=%d before=%v id=%q err=%v", limit, before, id, err)
+	}
+	for _, query := range []string{"?limit=0", "?limit=101", "?limit=nope", "?before_id=a1", "?before_created_at=nope&before_id=a1"} {
+		req = httptest.NewRequest(http.MethodGet, "/api/v1/projects/p/analyses"+query, nil)
+		if _, _, _, err := projectAnalysisPageParams(req); !errors.Is(err, shared.ErrValidation) {
+			t.Fatalf("query %q error=%v, want validation", query, err)
+		}
 	}
 }
 

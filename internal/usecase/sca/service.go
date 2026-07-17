@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -22,6 +23,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/evidence"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/vulnerability"
@@ -91,6 +94,9 @@ type Service struct {
 	codeQuality       interface {
 		BuildReport(context.Context, string) (codequality.Report, error)
 	}
+	projectAnalysisRecorder interface {
+		RecordProjectAnalysis(context.Context, shared.ID, string, time.Time, *ScanResult) error
+	}
 }
 
 // SetSeverityEnricher configures optional severity backfill (NVD CVSS) for vulnerabilities the
@@ -105,6 +111,14 @@ func (s *Service) SetCodeQuality(q interface {
 	BuildReport(context.Context, string) (codequality.Report, error)
 }) {
 	s.codeQuality = q
+}
+
+// SetProjectAnalysisRecorder registers the Project-only success boundary. Nil keeps
+// ordinary Engagement and CLI scans unchanged.
+func (s *Service) SetProjectAnalysisRecorder(r interface {
+	RecordProjectAnalysis(context.Context, shared.ID, string, time.Time, *ScanResult) error
+}) {
+	s.projectAnalysisRecorder = r
 }
 
 // SetIgnoreUnfixed controls whether vulnerabilities with no available fix are promoted to
@@ -422,10 +436,12 @@ func NewService(
 
 // ScanResult is the aggregate output of an SCA scan.
 type ScanResult struct {
-	Target    string                   `json:"target"`
-	ScanMode  string                   `json:"scan_mode"`
-	Languages []ports.DetectedLanguage `json:"languages"`
-	SBOM      *sbom.SBOM               `json:"sbom"`
+	Target       string                   `json:"target"`
+	SourceRef    string                   `json:"source_ref,omitempty"`
+	SourceCommit string                   `json:"source_commit,omitempty"`
+	ScanMode     string                   `json:"scan_mode"`
+	Languages    []ports.DetectedLanguage `json:"languages"`
+	SBOM         *sbom.SBOM               `json:"sbom"`
 	// Image carries container-image metadata (manifest digest, platform, ordered layer
 	// stack with base-image classification) for image scans; nil otherwise. Every vuln on
 	// an image is also attributed to its layer (Vulnerability.Layer*) – Epic D.
@@ -477,6 +493,9 @@ type ScanResult struct {
 	RiskMatches              map[string]int           `json:"risk_matches"` // kev/epss match counts (diagnostic)
 	FindingQuality           FindingQuality           `json:"finding_quality"`
 	CodeQuality              *codequality.Report      `json:"code_quality,omitempty"`
+	LineCoverage             *measure.CoverageReport  `json:"line_coverage,omitempty"`
+	Gate                     qualitygate.Gate         `json:"-"`
+	GateFile                 []byte                   `json:"-"`
 	// Coverage is the per-ecosystem component tally: components + resolved-version counts per
 	// ecosystem, so a thin / partially-resolved ecosystem is VISIBLE rather than hidden behind the single
 	// global Completeness number ("no silent gap").
@@ -507,10 +526,33 @@ func (r *ScanResult) SuspectedFPKeys() map[string]bool {
 	out := map[string]bool{}
 	for _, c := range r.AITriage {
 		if c.SuspectedFP {
-			out[c.DedupKey] = true
+			out[strings.TrimSpace(c.DedupKey)] = true
 		}
 	}
 	return out
+}
+
+// GateExemptKeys returns retain-and-mark findings excluded from a Project quality gate.
+func (r *ScanResult) GateExemptKeys(items []finding.Finding) map[string]bool {
+	exempt := map[string]bool{}
+	for _, keys := range []map[string]bool{r.SuppressedKeys(), r.NeedsVerifyKeys(), r.SuspectedFPKeys()} {
+		for key := range keys {
+			if key = strings.TrimSpace(key); key != "" {
+				exempt[key] = true
+			}
+		}
+	}
+	for _, item := range items {
+		key := finding.Identity(item)
+		if key == "" {
+			continue
+		}
+		if item.Class == finding.ClassFirstPartyHistoric || item.Impact == vulnerability.ImpactBackground || sbom.IsBackgroundScope(item.Scope) ||
+			item.Status == finding.StatusFalsePos || item.Status == finding.StatusRemediated {
+			exempt[key] = true
+		}
+	}
+	return exempt
 }
 
 // fpTriageCandidates selects the findings worth an LLM critique: production-scope, first-party source
@@ -549,8 +591,11 @@ const (
 type ScanOptions struct {
 	Mode string `json:"mode"`
 	// DetectionPriority selects comprehensive (default) or precise; see the Detection* consts.
-	DetectionPriority string `json:"detection_priority,omitempty"`
-	CodeQuality       bool   `json:"code_quality,omitempty"`
+	DetectionPriority string                  `json:"detection_priority,omitempty"`
+	CodeQuality       bool                    `json:"code_quality,omitempty"`
+	LineCoverage      *measure.CoverageReport `json:"line_coverage,omitempty"`
+	GateFile          []byte                  `json:"gate_file,omitempty"`
+	Gate              qualitygate.Gate        `json:"gate,omitempty"`
 }
 
 func normalizeScanOptions(opts ScanOptions) (ScanOptions, error) {
@@ -578,6 +623,27 @@ func normalizeScanOptions(opts ScanOptions) (ScanOptions, error) {
 }
 
 func NormalizeScanOptions(opts ScanOptions) (ScanOptions, error) { return normalizeScanOptions(opts) }
+
+const maxGateFileBytes = 1 << 20
+
+func readGateFile(root string) ([]byte, error) {
+	path := filepath.Join(root, ".synapse-gate.yaml")
+	fi, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stat project quality gate: %w", err)
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > maxGateFileBytes {
+		return nil, fmt.Errorf("%w: project quality gate is not a regular file within %d bytes", shared.ErrValidation, maxGateFileBytes)
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- fixed basename under the acquired workspace
+	if err != nil {
+		return nil, fmt.Errorf("read project quality gate: %w", err)
+	}
+	return data, nil
+}
 
 func (o ScanOptions) scansVulnerabilities() bool {
 	return o.Mode == ScanModeFull || o.Mode == ScanModeVulnerabilities
@@ -1329,16 +1395,25 @@ func (s *Service) runScanJob(actor string, engagementID shared.ID, now time.Time
 		_ = s.jobs.Save(ctx, job)
 	}
 
-	var err error
+	var (
+		result *ScanResult
+		err    error
+	)
 	if imported, doc, ok, loadErr := s.loadImportedSBOM(ctx, engagementID); loadErr != nil {
 		err = loadErr
 	} else if ok {
-		_, err = s.runImportedSBOMPipeline(ctx, actor, engagementID, now, imported, doc, opts, report)
+		result, err = s.runImportedSBOMPipeline(ctx, actor, engagementID, now, imported, doc, opts, report)
 	} else {
-		_, err = s.runPipeline(ctx, actor, engagementID, now, req, opts, report)
+		result, err = s.runPipeline(ctx, actor, engagementID, now, req, opts, report)
 	}
 
 	fin := s.clock.Now()
+	if err == nil && s.projectAnalysisRecorder != nil {
+		completionCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = s.projectAnalysisRecorder.RecordProjectAnalysis(completionCtx, engagementID, job.ID, fin, result)
+		cancel()
+	}
+
 	job.FinishedAt, job.Progress = &fin, 100
 	if err != nil {
 		job.Status, job.Stage, job.Error = ports.ScanFailed, "failed", truncateErr(err)
@@ -1478,6 +1553,9 @@ func (s *Service) runImportedSBOMPipeline(ctx context.Context, actor string, eng
 		RiskMatches:              riskMatches,
 		SourceWarnings:           sourceWarnings,
 		DebugEvents:              trace.snapshot(),
+		LineCoverage:             opts.LineCoverage,
+		Gate:                     opts.Gate,
+		GateFile:                 opts.GateFile,
 	}
 	result.Findings = buildFindings(engagementID, result, now, s.minSeverity, s.ignoreUnfixed, nil)
 	result.MinSeverity = s.minSeverity
@@ -1559,6 +1637,13 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 	if err != nil {
 		trace.fail(step, err)
 		return nil, fmt.Errorf("acquire target: %w", err)
+	}
+	if opts.GateFile == nil {
+		opts.GateFile, err = readGateFile(ws.Dir)
+		if err != nil {
+			trace.fail(step, err)
+			return nil, err
+		}
 	}
 	trace.succeed(step, "Target workspace acquired", nil)
 	defer func() { _ = ws.Close() }()
@@ -2017,6 +2102,8 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 
 	result := &ScanResult{
 		Target:                   req.Value, // report the original target, not the temp dir
+		SourceRef:                req.Ref,
+		SourceCommit:             ws.Commit,
 		ScanMode:                 opts.Mode,
 		Languages:                langs,
 		SBOM:                     doc,
@@ -2033,6 +2120,9 @@ func (s *Service) runPipeline(ctx context.Context, actor string, engagementID sh
 		SourceWarnings:           sourceWarnings,
 		Image:                    ws.Image,
 		DebugEvents:              trace.snapshot(),
+		LineCoverage:             opts.LineCoverage,
+		Gate:                     opts.Gate,
+		GateFile:                 opts.GateFile,
 	}
 	// Container-image layer attribution (Epic D): join each vuln to the layer that introduced
 	// its component, and classify base vs application layers. No-op for non-image scans.

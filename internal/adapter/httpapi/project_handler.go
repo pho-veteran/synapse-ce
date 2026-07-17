@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/coverage"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
 	projectuc "github.com/KKloudTarus/synapse-ce/internal/usecase/projectuc"
 )
@@ -21,9 +24,12 @@ type projectService interface {
 	CreateFromArchive(context.Context, projectuc.CreateInput, string, io.Reader) (*project.Project, error)
 	List(context.Context, shared.ID) ([]*project.Project, error)
 	Get(context.Context, shared.ID, string) (*project.Project, error)
-	StartAnalysis(context.Context, string, shared.ID, string) (ports.ScanJob, error)
+	AssignGate(context.Context, string, shared.ID, string, string) (*project.Project, error)
+	StartAnalysis(context.Context, string, shared.ID, string, *measure.CoverageReport) (ports.ScanJob, error)
 	AnalysisStatus(context.Context, shared.ID, string) (ports.ScanJob, error)
 	LatestAnalysis(context.Context, shared.ID, string) ([]byte, error)
+	ListAnalyses(context.Context, shared.ID, string, int, time.Time, shared.ID) ([]projectanalysis.Analysis, bool, error)
+	GetAnalysis(context.Context, shared.ID, string, string) (projectanalysis.Analysis, error)
 }
 
 func (rt *Router) SetProjects(s projectService) { rt.projects = s }
@@ -58,7 +64,7 @@ func (rt *Router) createProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer f.Close()
-		in.Name, in.Key = r.FormValue("name"), r.FormValue("key")
+		in.Name, in.Key, in.GateID = r.FormValue("name"), r.FormValue("key"), r.FormValue("gate_id")
 		p, err = rt.projects.CreateFromArchive(r.Context(), in, h.Filename, f)
 	} else {
 		var req createProjectRequest
@@ -95,6 +101,22 @@ func (rt *Router) getProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+func (rt *Router) assignProjectGate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		GateID string `json:"gate_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid json body"})
+		return
+	}
+	p, err := rt.projects.AssignGate(r.Context(), PrincipalFrom(r.Context()), shared.ID(TenantFrom(r.Context())), r.PathValue("key"), body.GateID)
+	if err != nil {
+		writeError(w, rt.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
 type projectAnalysisJobResponse struct {
 	ID          string                 `json:"id"`
 	Target      string                 `json:"target"`
@@ -116,13 +138,47 @@ func projectAnalysisJob(job ports.ScanJob) projectAnalysisJobResponse {
 	}
 }
 
+const maxCoverageUploadBytes = 16 << 20
+
 func (rt *Router) startProjectAnalysis(w http.ResponseWriter, r *http.Request) {
-	job, err := rt.projects.StartAnalysis(r.Context(), PrincipalFrom(r.Context()), shared.ID(TenantFrom(r.Context())), r.PathValue("key"))
+	coverage, err := parseCoverageUpload(w, r)
+	if err != nil {
+		writeError(w, rt.log, err)
+		return
+	}
+	job, err := rt.projects.StartAnalysis(r.Context(), PrincipalFrom(r.Context()), shared.ID(TenantFrom(r.Context())), r.PathValue("key"), coverage)
 	if err != nil {
 		writeError(w, rt.log, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, projectAnalysisJob(job))
+}
+
+func parseCoverageUpload(w http.ResponseWriter, r *http.Request) (*measure.CoverageReport, error) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		return nil, nil
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxCoverageUploadBytes+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		return nil, fmt.Errorf("%w: invalid or oversized coverage upload", shared.ErrValidation)
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, _, err := r.FormFile("coverage")
+	if err != nil {
+		return nil, fmt.Errorf("%w: coverage file is required", shared.ErrValidation)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxCoverageUploadBytes+1))
+	if err != nil || len(data) == 0 || len(data) > maxCoverageUploadBytes {
+		return nil, fmt.Errorf("%w: coverage file is empty or oversized", shared.ErrValidation)
+	}
+	report, _, err := coverage.ParseBytes(data)
+	if err != nil || report.TotalLines == 0 {
+		return nil, fmt.Errorf("%w: invalid coverage report", shared.ErrValidation)
+	}
+	return &report, nil
 }
 
 func (rt *Router) projectAnalysisStatus(w http.ResponseWriter, r *http.Request) {

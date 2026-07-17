@@ -14,6 +14,9 @@ import type {
   CreateProjectInput,
   Engagement,
   Project,
+  ProjectAnalysis,
+  ProjectAnalysisCursor,
+  ProjectAnalysisPage,
   EvidenceItem,
   EvidenceLedger,
   Finding,
@@ -42,6 +45,7 @@ import type {
   RuleQuality,
   RuleSeverity,
   RuleDetection,
+  QualityGate,
 } from './types'
 
 export class ApiError extends Error {
@@ -94,6 +98,15 @@ async function req(path: string, init?: RequestInit): Promise<any> {
 }
 
 // ---- mappers: raw API JSON (mixed casing) → clean types ----
+
+function mapQualityGate(r: any): QualityGate {
+  return {
+    key: r.key ?? '',
+    name: r.name ?? '',
+    conditions: (r.conditions ?? []).map((condition: any) => ({ metric: condition.metric ?? '', op: condition.op ?? '<=', threshold: condition.threshold ?? 0 })),
+    builtIn: r.built_in ?? false,
+  }
+}
 
 function mapProject(r: any): Project {
   return {
@@ -540,6 +553,23 @@ function mapCodeQualityReport(rep: any): CodeQualityReport {
   }
 }
 
+function mapProjectAnalysis(r: any): ProjectAnalysis {
+  const counts = (value: any) => ({ total: value?.total ?? 0, byKind: value?.by_kind ?? {}, bySeverity: value?.by_severity ?? {}, byStatus: value?.by_status ?? {} })
+  const rating = (value: any): CodeRating => ({
+    security: (value?.security ?? 'A') as CodeRating['security'], reliability: (value?.reliability ?? 'A') as CodeRating['reliability'],
+    maintainability: (value?.maintainability ?? 'A') as CodeRating['maintainability'], techDebtMinutes: value?.tech_debt_minutes ?? 0,
+    debtRatioPct: value?.debt_ratio_pct ?? 0, linesOfCode: value?.lines_of_code ?? 0,
+  })
+  return {
+    id: r.id ?? '', createdAt: r.created_at ?? '', sourceRef: r.source_ref ?? '', sourceCommit: r.source_commit ?? '',
+    gate: { passed: r.gate?.passed ?? false, results: (r.gate?.results ?? []).map((result: any) => ({ condition: { metric: result.metric ?? '', op: result.op ?? '', threshold: result.threshold ?? 0 }, actual: result.actual ?? 0, passed: result.passed ?? false })) },
+    issues: counts(r.issues), newCode: { previousId: r.new_code?.previous_id ?? '', counts: counts(r.new_code?.counts), rating: rating(r.new_code?.rating) },
+    delta: r.delta ? { issues: counts(r.delta.issues), measures: r.delta.measures ?? {}, ratings: r.delta.ratings ?? {} } : null, measures: r.measures ?? {},
+    coverage: r.coverage ? { coveredLines: r.coverage.covered_lines ?? 0, totalLines: r.coverage.total_lines ?? 0 } : null,
+    duplication: { blocks: [], duplicatedLines: r.duplication?.duplicated_lines ?? 0, totalLines: r.duplication?.total_lines ?? 0, files: r.duplication?.files ?? 0 }, rating: rating(r.rating),
+  }
+}
+
 function mapScanResult(r: any): ScanResult {
   return {
     target: r.target ?? '',
@@ -723,6 +753,20 @@ function mapRuleDetail(raw: any): RuleDetail {
 export const api = {
   aup: (): Promise<AupStatus> => req('/aup'),
 
+  // --- Quality gates ---
+  listQualityGates: async (): Promise<QualityGate[]> =>
+    ((await req('/quality-gates')) ?? []).map(mapQualityGate),
+
+  createQualityGate: async (gate: Omit<QualityGate, 'builtIn'>): Promise<QualityGate> =>
+    mapQualityGate(await req('/quality-gates', { method: 'POST', body: JSON.stringify(gate) })),
+
+  updateQualityGate: async (key: string, gate: Omit<QualityGate, 'key' | 'builtIn'>): Promise<QualityGate> =>
+    mapQualityGate(await req(`/quality-gates/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(gate) })),
+
+  deleteQualityGate: async (key: string): Promise<void> => {
+    await req(`/quality-gates/${encodeURIComponent(key)}`, { method: 'DELETE' })
+  },
+
   // --- Rules ---
   listRules: async (filters: Partial<RuleListFilters> = {}): Promise<RuleSummary[]> => {
     const q = new URLSearchParams()
@@ -756,14 +800,16 @@ export const api = {
             Value: input.sourceBinding.value,
             Ref: input.sourceBinding.ref,
           },
+          gate_id: input.gateId ?? '',
         }),
       }),
     ),
 
-  createProjectFromArchive: async (name: string, key: string, archive: File): Promise<Project> => {
+  createProjectFromArchive: async (name: string, key: string, archive: File, gateId = ''): Promise<Project> => {
     const form = new FormData()
     form.append('name', name)
     form.append('key', key)
+    form.append('gate_id', gateId)
     form.append('archive', archive)
     const res = await fetch('/api/v1/projects', {
       method: 'POST',
@@ -782,8 +828,39 @@ export const api = {
   getProject: async (key: string): Promise<Project> =>
     mapProject(await req(`/projects/${encodeURIComponent(key)}`)),
 
-  startProjectAnalysis: async (key: string): Promise<ScanJob> =>
-    mapScanJob(await req(`/projects/${encodeURIComponent(key)}/analyses`, { method: 'POST' })),
+  assignProjectGate: async (key: string, gateId: string): Promise<Project> =>
+    mapProject(await req(`/projects/${encodeURIComponent(key)}/gate`, { method: 'PUT', body: JSON.stringify({ gate_id: gateId }) })),
+
+  startProjectAnalysis: async (key: string, coverage?: File): Promise<ScanJob> => {
+    const path = `/projects/${encodeURIComponent(key)}/analyses`
+    if (!coverage) return mapScanJob(await req(path, { method: 'POST' }))
+    const form = new FormData()
+    form.append('coverage', coverage)
+    const res = await fetch(`/api/v1${path}`, { method: 'POST', headers: token ? { authorization: `Bearer ${token}` } : {}, body: form })
+    if (res.status === 401 && onUnauthorized) onUnauthorized()
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`
+      try { message = (await res.json())?.error ?? message } catch { /* non-JSON */ }
+      throw new ApiError(res.status, message)
+    }
+    return mapScanJob(await res.json())
+  },
+
+  projectAnalyses: async (key: string, cursor: ProjectAnalysisCursor | null = null): Promise<ProjectAnalysisPage> => {
+    const query = new URLSearchParams({ limit: '25' })
+    if (cursor) {
+      query.set('before_created_at', cursor.beforeCreatedAt)
+      query.set('before_id', cursor.beforeId)
+    }
+    const page = await req(`/projects/${encodeURIComponent(key)}/analyses?${query}`)
+    return {
+      items: (page?.items ?? []).map(mapProjectAnalysis),
+      next: page?.next ? { beforeCreatedAt: page.next.before_created_at ?? '', beforeId: page.next.before_id ?? '' } : null,
+    }
+  },
+
+  projectAnalysis: async (key: string, id: string): Promise<ProjectAnalysis> =>
+    mapProjectAnalysis(await req(`/projects/${encodeURIComponent(key)}/analyses/${encodeURIComponent(id)}`)),
 
   projectAnalysisStatus: async (key: string): Promise<ScanJob | null> => {
     try {

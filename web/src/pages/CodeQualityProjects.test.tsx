@@ -5,7 +5,7 @@ import { api } from '../lib/api'
 import { CodeQualityProject } from './CodeQualityProject'
 import { CodeQualityProjects } from './CodeQualityProjects'
 
-vi.mock('../lib/api', () => ({ api: { listProjects: vi.fn(), createProject: vi.fn(), createProjectFromArchive: vi.fn(), getProject: vi.fn(), startProjectAnalysis: vi.fn(), projectAnalysisStatus: vi.fn(), latestProjectAnalysis: vi.fn() } }))
+vi.mock('../lib/api', () => ({ api: { listProjects: vi.fn(), listQualityGates: vi.fn(), createProject: vi.fn(), createProjectFromArchive: vi.fn(), getProject: vi.fn(), assignProjectGate: vi.fn(), startProjectAnalysis: vi.fn(), projectAnalysisStatus: vi.fn(), latestProjectAnalysis: vi.fn(), projectAnalyses: vi.fn() } }))
 
 const project = { id: 'p1', name: 'Synapse', key: 'synapse', sourceBinding: { kind: 'git' as const, value: 'https://example.com/repo.git', ref: 'main' }, defaultProfileByLang: {}, gateId: '', createdAt: null }
 
@@ -15,7 +15,9 @@ describe('Code Quality projects', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     vi.mocked(api.projectAnalysisStatus).mockResolvedValue(null)
+    vi.mocked(api.listQualityGates).mockResolvedValue([])
     vi.mocked(api.latestProjectAnalysis).mockResolvedValue(null)
+    vi.mocked(api.projectAnalyses).mockResolvedValue({ items: [], next: null })
   })
 
   it('renders loading, empty, and list states', async () => {
@@ -123,5 +125,6 @@ describe('Code Quality projects', () => {
     render(<MemoryRouter initialEntries={['/code-quality/projects/synapse']}><Routes><Route path="/code-quality/projects/:key" element={<CodeQualityProject />} /></Routes></MemoryRouter>)
     expect(await screen.findByRole('heading', { name: 'Synapse' })).toBeInTheDocument()
     expect(screen.getByText('No analyses yet')).toBeInTheDocument()
+    expect(screen.getByLabelText('Coverage report (optional)')).toHaveAttribute('type', 'file')
   })
 })

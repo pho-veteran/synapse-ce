@@ -539,7 +539,7 @@ func (r *ScanResult) NeedsVerifyKeys() map[string]bool {
 	}
 	m := make(map[string]bool, len(r.NeedsVerification))
 	for _, n := range r.NeedsVerification {
-		m[n.DedupKey] = true
+		m[strings.TrimSpace(n.DedupKey)] = true
 	}
 	return m
 }
@@ -551,7 +551,7 @@ func (r *ScanResult) SuppressedKeys() map[string]bool {
 	}
 	m := make(map[string]bool, len(r.SuppressedFindings))
 	for _, s := range r.SuppressedFindings {
-		m[s.DedupKey] = true
+		m[strings.TrimSpace(s.DedupKey)] = true
 	}
 	return m
 }

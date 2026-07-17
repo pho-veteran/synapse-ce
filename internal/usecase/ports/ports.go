@@ -18,6 +18,8 @@ import (
 	"github.com/KKloudTarus/synapse-ce/internal/domain/importedsbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/judgment"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/rule"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/sbom"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
@@ -42,7 +44,25 @@ type ProjectRepository interface {
 	Create(ctx context.Context, p *project.Project) error
 	List(ctx context.Context, tenantID shared.ID) ([]*project.Project, error)
 	GetByKey(ctx context.Context, tenantID shared.ID, key string) (*project.Project, error)
+	GetByID(ctx context.Context, tenantID, projectID shared.ID) (*project.Project, error)
+	UpdateGate(ctx context.Context, tenantID shared.ID, key, gateID string) error
 	DeleteByKey(ctx context.Context, tenantID shared.ID, key string) error
+}
+
+// QualityGateStore persists tenant-scoped custom gate definitions.
+type QualityGateStore interface {
+	Create(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate) error
+	List(ctx context.Context, tenantID shared.ID) ([]qualitygate.Gate, error)
+	Get(ctx context.Context, tenantID shared.ID, key string) (qualitygate.Gate, error)
+	Update(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate) error
+	Delete(ctx context.Context, tenantID shared.ID, key string) error
+}
+
+// ProjectAnalysisStore persists immutable, tenant-scoped Project analysis snapshots.
+type ProjectAnalysisStore interface {
+	Save(ctx context.Context, analysis projectanalysis.Analysis) error
+	List(ctx context.Context, tenantID, projectID shared.ID, limit int, beforeCreatedAt time.Time, beforeID shared.ID) ([]projectanalysis.Analysis, bool, error)
+	Get(ctx context.Context, tenantID, projectID, analysisID shared.ID) (projectanalysis.Analysis, error)
 }
 
 // ProjectArchiveStore retains uploaded source archives so a Project can be re-analyzed.
@@ -540,6 +560,7 @@ type AcquireRequest struct {
 // Cleanup, if set, removes any temporary resources and must be called when done.
 type Workspace struct {
 	Dir          string
+	Commit       string   // resolved Git HEAD for cloned sources; empty for local/archive/image targets
 	Lockfiles    []string // recognized lockfile basenames present (scan-completeness signal)
 	LocalModules []string // module paths declared in the repo (go.mod module, package.json name) – first-party identities
 	// UnresolvedEcosystems are build systems present in the repo whose dependencies

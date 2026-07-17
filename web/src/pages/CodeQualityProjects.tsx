@@ -46,9 +46,9 @@ export function CodeQualityProjects() {
           <h1 className="text-3xl font-bold tracking-tight">Code Quality</h1>
           <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-mutedfg">Long-lived projects keep code health separate from time-bounded pentest engagements.</p>
         </div>
-        <Button variant="brand" onClick={() => setCreating((value) => !value)}>
+        <div className="flex gap-2"><Link to="/code-quality/gates"><Button variant="secondary">Quality gates</Button></Link><Button variant="brand" onClick={() => setCreating((value) => !value)}>
           {creating ? <><X className="size-4" aria-hidden="true" /> Cancel</> : <><Plus className="size-4" aria-hidden="true" /> New project</>}
-        </Button>
+        </Button></div>
       </header>
 
       {creating && <div className="mb-6"><CreateProjectForm /></div>}
@@ -114,11 +114,17 @@ function CreateProjectForm() {
   const [value, setValue] = useState('')
   const [ref, setRef] = useState('')
   const [archive, setArchive] = useState<File | null>(null)
+  const [gateId, setGateId] = useState('')
+  const [gates, setGates] = useState<{ key: string; name: string }[]>([])
   const [dragging, setDragging] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
   const archiveInput = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    api.listQualityGates().then(setGates).catch(() => setGates([]))
+  }, [])
 
   function chooseArchive(file: File | undefined) {
     if (!file) return
@@ -134,8 +140,8 @@ function CreateProjectForm() {
     setSubmitting(true); setError(null)
     try {
       const project = kind === 'archive'
-        ? await api.createProjectFromArchive(name.trim(), key.trim(), archive!)
-        : await api.createProject({ name: name.trim(), key: key.trim(), sourceBinding: { kind, value: value.trim(), ref: kind === 'git' ? ref.trim() : '' } })
+        ? await api.createProjectFromArchive(name.trim(), key.trim(), archive!, gateId)
+        : await api.createProject({ name: name.trim(), key: key.trim(), sourceBinding: { kind, value: value.trim(), ref: kind === 'git' ? ref.trim() : '' }, gateId })
       try {
         await api.startProjectAnalysis(project.key)
         navigate(`/code-quality/projects/${encodeURIComponent(project.key)}`)
@@ -171,6 +177,12 @@ function CreateProjectForm() {
           )}
         </div>
         {kind === 'git' && <Field label="Branch or tag" hint="Optional; uses the default branch when empty" htmlFor="project-ref"><Input id="project-ref" className="font-mono" value={ref} onChange={(e) => setRef(e.target.value)} placeholder="main" /></Field>}
+        <Field label="Quality gate" hint="A repository .synapse-gate.yaml overrides Default when no managed gate is assigned." htmlFor="project-gate">
+          <select id="project-gate" value={gateId} onChange={(e) => setGateId(e.target.value)} className="h-10 w-full rounded-lg border border-border bg-bg px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-brand/60">
+            <option value="">Default / repository file</option>
+            {gates.map((gate) => <option key={gate.key} value={gate.key}>{gate.name}</option>)}
+          </select>
+        </Field>
         {error && <ErrorState message={error} />}
         <div className="flex justify-end"><Button variant="brand" type="submit" loading={submitting}><GitBranch className="size-4" aria-hidden="true" /> Create project</Button></div>
       </form>

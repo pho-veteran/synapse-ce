@@ -29,14 +29,23 @@ func LoadGate(path string) (qualitygate.Gate, bool, error) {
 	if err != nil || !found {
 		return qualitygate.Gate{}, found, err
 	}
-	var g qualitygate.Gate
-	if err := strictUnmarshal(data, &g); err != nil {
-		return qualitygate.Gate{}, true, fmt.Errorf("parse %s: %w", path, err)
-	}
-	if err := g.Validate(); err != nil {
-		return qualitygate.Gate{}, true, fmt.Errorf("invalid gate %s: %w", path, err)
+	g, err := LoadGateBytes(data)
+	if err != nil {
+		return qualitygate.Gate{}, true, fmt.Errorf("%s: %w", path, err)
 	}
 	return g, true, nil
+}
+
+// LoadGateBytes parses one bounded gate document already read from a trusted workspace.
+func LoadGateBytes(data []byte) (qualitygate.Gate, error) {
+	var g qualitygate.Gate
+	if err := strictUnmarshal(data, &g); err != nil {
+		return qualitygate.Gate{}, fmt.Errorf("parse gate: %w", err)
+	}
+	if err := g.Validate(); err != nil {
+		return qualitygate.Gate{}, fmt.Errorf("invalid gate: %w", err)
+	}
+	return g, nil
 }
 
 // LoadProfile reads a rule-profile YAML file. found=false when the path is empty or the file is absent.

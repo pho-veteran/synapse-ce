@@ -607,6 +607,20 @@ export interface CreateProjectInput {
   name: string
   key: string
   sourceBinding: ProjectSourceBinding
+  gateId?: string
+}
+
+export interface QualityGateCondition {
+  metric: string
+  op: '<=' | '>=' | '==' | '<' | '>'
+  threshold: number
+}
+
+export interface QualityGate {
+  key: string
+  name: string
+  conditions: QualityGateCondition[]
+  builtIn: boolean
 }
 
 export interface LanguageInventory {
@@ -659,6 +673,49 @@ export interface CodeQualityView {
   available: boolean
   reason?: string
   report?: CodeQualityReport
+}
+
+export interface ProjectIssueCounts {
+  total: number
+  byKind: Record<string, number>
+  bySeverity: Record<string, number>
+  byStatus: Record<string, number>
+}
+
+export interface ProjectGateCondition {
+  condition: { metric: string; op: string; threshold: number }
+  actual: number
+  passed: boolean
+}
+
+export interface ProjectGateResult {
+  passed: boolean
+  results: ProjectGateCondition[]
+}
+
+export interface ProjectAnalysis {
+  id: string
+  createdAt: string
+  sourceRef: string
+  sourceCommit: string
+  gate: ProjectGateResult
+  issues: ProjectIssueCounts
+  newCode: { previousId: string; counts: ProjectIssueCounts; rating: CodeRating }
+  delta: { issues: ProjectIssueCounts; measures: Record<string, number>; ratings: Record<string, number> } | null
+  measures: Record<string, number>
+  coverage: { coveredLines: number; totalLines: number } | null
+  duplication: DuplicationSummary
+  rating: CodeRating
+}
+
+export interface ProjectAnalysisCursor {
+  beforeCreatedAt: string
+  beforeId: string
+}
+
+export interface ProjectAnalysisPage {
+  items: ProjectAnalysis[]
+  next: ProjectAnalysisCursor | null
 }
 
 // --- Rules API ---

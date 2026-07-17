@@ -89,6 +89,34 @@ func (r *ProjectRepository) GetByKey(ctx context.Context, tenantID shared.ID, ke
 	return p, nil
 }
 
+func (r *ProjectRepository) GetByID(ctx context.Context, tenantID, projectID shared.ID) (*project.Project, error) {
+	var row pgx.Row
+	if tenantID.IsZero() {
+		row = r.pool.QueryRow(ctx, `SELECT `+projectCols+` FROM projects WHERE id=$1`, projectID.String())
+	} else {
+		row = r.pool.QueryRow(ctx, `SELECT `+projectCols+` FROM projects WHERE tenant_id=$1 AND id=$2`, tenantID.String(), projectID.String())
+	}
+	p, err := scanProject(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, shared.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select project: %w", err)
+	}
+	return p, nil
+}
+
+func (r *ProjectRepository) UpdateGate(ctx context.Context, tenantID shared.ID, key, gateID string) error {
+	ct, err := r.pool.Exec(ctx, `UPDATE projects SET gate_id=$3, updated_at=now() WHERE tenant_id=$1 AND key=$2`, tenantID.String(), key, gateID)
+	if err != nil {
+		return fmt.Errorf("update project gate: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return shared.ErrNotFound
+	}
+	return nil
+}
+
 func (r *ProjectRepository) DeleteByKey(ctx context.Context, tenantID shared.ID, key string) error {
 	var (
 		ct  pgconn.CommandTag

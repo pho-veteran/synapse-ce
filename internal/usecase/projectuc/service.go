@@ -8,11 +8,18 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/engagement"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/finding"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/project"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/qualitygate"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
+	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/tools/qualityprofile"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
+	qualitygatesuc "github.com/KKloudTarus/synapse-ce/internal/usecase/qualitygates"
 	scauc "github.com/KKloudTarus/synapse-ce/internal/usecase/sca"
 )
 
@@ -24,6 +31,9 @@ type Service struct {
 	audit            ports.AuditLogger
 	scanner          *scauc.Service
 	archives         ports.ProjectArchiveStore
+	analyses         ports.ProjectAnalysisStore
+	findings         ports.FindingRepository
+	gates            *qualitygatesuc.Service
 	allowLocalSource bool
 }
 
@@ -31,8 +41,11 @@ func NewService(repo ports.ProjectRepository, engagements ports.EngagementReposi
 	return &Service{repo: repo, engagements: engagements, clock: clock, ids: ids, audit: audit, allowLocalSource: allowLocalSource}
 }
 
-func (s *Service) SetScanner(scanner *scauc.Service)               { s.scanner = scanner }
-func (s *Service) SetArchiveStore(store ports.ProjectArchiveStore) { s.archives = store }
+func (s *Service) SetScanner(scanner *scauc.Service)                 { s.scanner = scanner }
+func (s *Service) SetArchiveStore(store ports.ProjectArchiveStore)   { s.archives = store }
+func (s *Service) SetAnalysisStore(store ports.ProjectAnalysisStore) { s.analyses = store }
+func (s *Service) SetFindingRepository(repo ports.FindingRepository) { s.findings = repo }
+func (s *Service) SetQualityGates(gates *qualitygatesuc.Service)     { s.gates = gates }
 
 func (s *Service) CreateFromArchive(ctx context.Context, in CreateInput, filename string, src io.Reader) (*project.Project, error) {
 	if err := requireActor(in.CreatedBy); err != nil {
@@ -84,6 +97,9 @@ func (s *Service) create(ctx context.Context, in CreateInput, id shared.ID) (*pr
 		}
 	}
 	now := s.clock.Now()
+	if _, err := s.resolveManagedGate(ctx, in.TenantID, in.GateID); err != nil {
+		return nil, err
+	}
 	p, err := project.New(id, in.TenantID, in.Name, in.Key, in.SourceBinding, in.DefaultProfileByLang, in.GateID, now)
 	if err != nil {
 		return nil, err
@@ -139,7 +155,28 @@ func (s *Service) analysisContext(ctx context.Context, tenantID shared.ID, key s
 	return p, e, nil
 }
 
-func (s *Service) StartAnalysis(ctx context.Context, actor string, tenantID shared.ID, key string) (ports.ScanJob, error) {
+func (s *Service) AssignGate(ctx context.Context, actor string, tenantID shared.ID, key, gateID string) (*project.Project, error) {
+	if err := requireActor(actor); err != nil {
+		return nil, err
+	}
+	p, err := s.Get(ctx, tenantID, key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.resolveManagedGate(ctx, tenantID, gateID); err != nil {
+		return nil, err
+	}
+	if err := s.repo.UpdateGate(ctx, tenantID, p.Key, strings.TrimSpace(gateID)); err != nil {
+		return nil, fmt.Errorf("assign project quality gate: %w", err)
+	}
+	p.GateID = strings.TrimSpace(gateID)
+	if err := s.audit.Record(ctx, ports.AuditEntry{Actor: actor, Action: "project.gate.assign", Target: p.ID.String(), Metadata: map[string]string{"project": p.Key, "gate": p.GateID}, At: s.clock.Now()}); err != nil {
+		return nil, fmt.Errorf("audit project quality gate assignment: %w", err)
+	}
+	return p, nil
+}
+
+func (s *Service) StartAnalysis(ctx context.Context, actor string, tenantID shared.ID, key string, coverage *measure.CoverageReport) (ports.ScanJob, error) {
 	if err := requireActor(actor); err != nil {
 		return ports.ScanJob{}, err
 	}
@@ -150,6 +187,10 @@ func (s *Service) StartAnalysis(ctx context.Context, actor string, tenantID shar
 	if err != nil {
 		return ports.ScanJob{}, err
 	}
+	gate, err := s.resolveManagedGate(ctx, tenantID, p.GateID)
+	if err != nil {
+		return ports.ScanJob{}, err
+	}
 	if latest, latestErr := s.scanner.LatestJob(ctx, e.ID); latestErr == nil && latest.Status == ports.ScanRunning {
 		return ports.ScanJob{}, fmt.Errorf("%w: project analysis is already running", shared.ErrConflict)
 	} else if latestErr != nil && !errors.Is(latestErr, shared.ErrNotFound) {
@@ -157,7 +198,7 @@ func (s *Service) StartAnalysis(ctx context.Context, actor string, tenantID shar
 	}
 	return s.scanner.StartScanWithOptions(ctx, actor, e.ID, ports.AcquireRequest{
 		Kind: p.SourceBinding.Kind, Value: p.SourceBinding.Value, Ref: p.SourceBinding.Ref,
-	}, scauc.ScanOptions{Mode: scauc.ScanModeFull, CodeQuality: true})
+	}, scauc.ScanOptions{Mode: scauc.ScanModeFull, CodeQuality: true, LineCoverage: coverage, Gate: gate})
 }
 
 func (s *Service) AnalysisStatus(ctx context.Context, tenantID shared.ID, key string) (ports.ScanJob, error) {
@@ -180,6 +221,134 @@ func (s *Service) LatestAnalysis(ctx context.Context, tenantID shared.ID, key st
 		return nil, err
 	}
 	return s.scanner.LatestResult(ctx, e.ID)
+}
+
+// ListAnalyses returns one immutable Project history page, newest first.
+func (s *Service) ListAnalyses(ctx context.Context, tenantID shared.ID, key string, limit int, beforeCreatedAt time.Time, beforeID shared.ID) ([]projectanalysis.Analysis, bool, error) {
+	if s.analyses == nil {
+		return nil, false, shared.ErrNotFound
+	}
+	p, err := s.Get(ctx, tenantID, key)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.analyses.List(ctx, tenantID, p.ID, limit, beforeCreatedAt, beforeID)
+}
+
+// GetAnalysis returns one snapshot without disclosing another Project's history.
+func (s *Service) GetAnalysis(ctx context.Context, tenantID shared.ID, key, id string) (projectanalysis.Analysis, error) {
+	if s.analyses == nil {
+		return projectanalysis.Analysis{}, shared.ErrNotFound
+	}
+	p, err := s.Get(ctx, tenantID, key)
+	if err != nil {
+		return projectanalysis.Analysis{}, err
+	}
+	return s.analyses.Get(ctx, tenantID, p.ID, shared.ID(id))
+}
+
+// RecordProjectAnalysis is called by SCA only after a successful pipeline and
+// before its ScanJob becomes succeeded. Non-Project scans intentionally no-op.
+func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared.ID, jobID string, completedAt time.Time, result *scauc.ScanResult) error {
+	if result == nil {
+		return fmt.Errorf("project analysis result is required")
+	}
+	e, err := s.engagements.GetByID(ctx, engagementID)
+	if err != nil {
+		return fmt.Errorf("get project analysis context: %w", err)
+	}
+	if e.ProjectID.IsZero() {
+		return nil
+	}
+	if s.analyses == nil {
+		return fmt.Errorf("project analysis store is not configured")
+	}
+	p, err := s.repo.GetByID(ctx, e.TenantID, e.ProjectID)
+	if err != nil {
+		return fmt.Errorf("get project for analysis: %w", err)
+	}
+	previous, _, err := s.analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil {
+		return fmt.Errorf("list project analyses: %w", err)
+	}
+	var baseline *projectanalysis.Analysis
+	if len(previous) > 0 {
+		baseline = &previous[0]
+	}
+	all := append([]finding.Finding{}, result.Findings...)
+	if result.CodeQuality != nil {
+		all = append(all, result.CodeQuality.Findings...)
+	}
+	if s.findings != nil {
+		persisted, err := s.findings.ListByEngagement(ctx, engagementID)
+		if err != nil {
+			return fmt.Errorf("list persisted findings: %w", err)
+		}
+		statuses := make(map[string]finding.Status, len(persisted))
+		for _, item := range persisted {
+			if key := finding.Identity(item); key != "" {
+				statuses[key] = item.Status
+			}
+		}
+		for i := range all {
+			if status, ok := statuses[finding.Identity(all[i])]; ok {
+				all[i].Status = status
+			}
+		}
+	}
+	all = finding.Publishable(all)
+	loc := 0
+	if result.CodeQuality != nil {
+		loc = result.CodeQuality.Inventory.Totals().CodeLines
+	}
+	gate := result.Gate
+	if len(gate.Conditions) == 0 {
+		var err error
+		gate, err = s.resolveManagedGate(ctx, p.TenantID, p.GateID)
+		if err != nil {
+			return err
+		}
+	}
+	if p.GateID == "" && len(result.GateFile) > 0 {
+		var err error
+		gate, err = qualityprofile.LoadGateBytes(result.GateFile)
+		if err != nil {
+			return fmt.Errorf("load project quality gate: %w", err)
+		}
+	}
+	analysis, err := projectanalysis.Build(projectanalysis.Input{
+		ID: jobID, TenantID: p.TenantID, ProjectID: p.ID, ProjectKey: p.Key, CreatedAt: completedAt,
+		SourceRef: result.SourceRef, SourceCommit: result.SourceCommit, Findings: all, Gate: gate, GateExempt: result.GateExemptKeys(all), LinesOfCode: loc,
+		Coverage: result.LineCoverage, Duplication: duplicationOf(result), Previous: baseline,
+	})
+	if err != nil {
+		return fmt.Errorf("build project analysis: %w", err)
+	}
+	if err := s.analyses.Save(ctx, analysis); err != nil {
+		return fmt.Errorf("save project analysis: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) resolveManagedGate(ctx context.Context, tenantID shared.ID, key string) (qualitygate.Gate, error) {
+	if strings.TrimSpace(key) == "" {
+		return qualitygate.Gate{}, nil
+	}
+	if s.gates == nil {
+		return qualitygate.Gate{}, fmt.Errorf("%w: quality gate service is not configured", shared.ErrValidation)
+	}
+	gate, err := s.gates.Get(ctx, tenantID, key)
+	if err != nil {
+		return qualitygate.Gate{}, err
+	}
+	return gate, nil
+}
+
+func duplicationOf(result *scauc.ScanResult) measure.DuplicationReport {
+	if result.CodeQuality == nil {
+		return measure.DuplicationReport{}
+	}
+	return result.CodeQuality.Duplication
 }
 
 func (s *Service) Delete(ctx context.Context, actor string, tenantID shared.ID, key string) error {

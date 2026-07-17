@@ -28,6 +28,15 @@ func TestKindValid(t *testing.T) {
 	}
 }
 
+func TestIdentityTrimsDedupKeyAndFallsBackToID(t *testing.T) {
+	if got := Identity(Finding{ID: " id ", DedupKey: " key "}); got != "key" {
+		t.Fatalf("identity=%q, want key", got)
+	}
+	if got := Identity(Finding{ID: " id "}); got != "id" {
+		t.Fatalf("identity=%q, want id", got)
+	}
+}
+
 func TestPublishable(t *testing.T) {
 	in := []Finding{
 		{ID: "sca", Kind: KindSCA, EvidenceScore: 0},                                       // not gated → kept
