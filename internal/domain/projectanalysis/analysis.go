@@ -40,7 +40,21 @@ type Delta struct {
 type NewCode struct {
 	PreviousID string        `json:"previous_id,omitempty"`
 	Counts     Counts        `json:"counts"`
-	Rating     rating.Report `json:"rating"`
+	Rating     NewCodeRating `json:"rating"`
+}
+
+// NewCodeRating omits maintainability until Project scans retain changed-line LOC.
+type NewCodeRating struct {
+	Security        rating.Grade  `json:"security"`
+	Reliability     rating.Grade  `json:"reliability"`
+	Maintainability *rating.Grade `json:"maintainability"`
+}
+
+// GateInfo records which policy produced the immutable evaluated result.
+type GateInfo struct {
+	Key    string `json:"key,omitempty"`
+	Name   string `json:"name"`
+	Source string `json:"source"`
 }
 
 // Analysis is an append-only Project analysis snapshot. InternalIssues never crosses
@@ -55,6 +69,7 @@ type Analysis struct {
 	SourceCommit   string                    `json:"source_commit,omitempty"`
 	Measures       qualitygate.Snapshot      `json:"measures"`
 	Gate           qualitygate.Result        `json:"gate"`
+	GateInfo       GateInfo                  `json:"gate_info"`
 	Issues         Counts                    `json:"issues"`
 	InternalIssues []Issue                   `json:"internal_issues"`
 	NewCode        NewCode                   `json:"new_code"`
@@ -76,6 +91,7 @@ type Input struct {
 	SourceCommit string
 	Findings     []finding.Finding
 	Gate         qualitygate.Gate
+	GateSource   string
 	GateExempt   map[string]bool
 	LinesOfCode  int
 	Coverage     *measure.CoverageReport
@@ -128,20 +144,31 @@ func Build(in Input) (Analysis, error) {
 	gateIssues := compactIssuesOnly(gateFindings)
 	gateNewIssues := compactIssuesOnly(gateNewFindings)
 	overallRating := rating.Compute(normalized, in.LinesOfCode)
-	newRating := rating.Compute(newFindings, in.LinesOfCode)
+	newRating := rating.Compute(newFindings, 0)
 	gateOverallRating := rating.Compute(gateFindings, in.LinesOfCode)
 	measures := buildMeasures(countIssues(gateIssues), countIssues(gateNewIssues), gateOverallRating, in.Duplication, in.Coverage)
 	gateDef := in.Gate
+	gateSource := in.GateSource
 	if len(gateDef.Conditions) == 0 {
 		gateDef = qualitygate.Default()
+		gateSource = "default"
+	}
+	gateName := gateDef.Name
+	if gateName == "" {
+		if gateSource == "repository" {
+			gateName = "Repository gate"
+		} else {
+			gateName = "Quality gate"
+		}
 	}
 	gate := qualitygate.Evaluate(gateDef, measures)
 
 	return Analysis{
 		ID: in.ID, TenantID: in.TenantID.String(), ProjectID: in.ProjectID.String(),
 		ProjectKey: in.ProjectKey, CreatedAt: in.CreatedAt, SourceRef: in.SourceRef,
-		SourceCommit: in.SourceCommit, Measures: measures, Gate: gate, Issues: counts,
-		InternalIssues: issues, NewCode: NewCode{PreviousID: previousID, Counts: newCounts, Rating: newRating},
+		SourceCommit: in.SourceCommit, Measures: measures, Gate: gate,
+		GateInfo: GateInfo{Key: gateDef.Key, Name: gateName, Source: gateSource}, Issues: counts,
+		InternalIssues: issues, NewCode: NewCode{PreviousID: previousID, Counts: newCounts, Rating: NewCodeRating{Security: newRating.Security, Reliability: newRating.Reliability}},
 		Delta: buildDelta(counts, measures, overallRating, in.Previous), Coverage: in.Coverage,
 		Duplication: in.Duplication, Rating: overallRating,
 	}, nil

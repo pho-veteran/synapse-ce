@@ -46,6 +46,7 @@ type ProjectRepository interface {
 	GetByKey(ctx context.Context, tenantID shared.ID, key string) (*project.Project, error)
 	GetByID(ctx context.Context, tenantID, projectID shared.ID) (*project.Project, error)
 	UpdateGate(ctx context.Context, tenantID shared.ID, key, gateID string) error
+	CountByGate(ctx context.Context, tenantID shared.ID, gateID string) (int, error)
 	DeleteByKey(ctx context.Context, tenantID shared.ID, key string) error
 }
 
@@ -56,11 +57,24 @@ type QualityGateStore interface {
 	Get(ctx context.Context, tenantID shared.ID, key string) (qualitygate.Gate, error)
 	Update(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate) error
 	Delete(ctx context.Context, tenantID shared.ID, key string) error
+	DeleteIfUnassigned(ctx context.Context, tenantID shared.ID, key string) error
+}
+
+// QualityGateMutator coordinates managed-gate writes, audit records, and safe custom-gate Project references.
+type QualityGateMutator interface {
+	CreateGate(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate, audit AuditEntry) error
+	UpdateGate(ctx context.Context, tenantID shared.ID, gate qualitygate.Gate, audit AuditEntry) error
+	DeleteGate(ctx context.Context, tenantID shared.ID, key string, audit AuditEntry) error
+	AssignProjectGate(ctx context.Context, tenantID shared.ID, projectKey, gateID string, audit AuditEntry) error
+	CreateProjectWithGate(ctx context.Context, p *project.Project) error
 }
 
 // ProjectAnalysisStore persists immutable, tenant-scoped Project analysis snapshots.
 type ProjectAnalysisStore interface {
 	Save(ctx context.Context, analysis projectanalysis.Analysis) error
+	SaveWithResult(ctx context.Context, analysis projectanalysis.Analysis, result []byte) error
+	LatestWithResult(ctx context.Context, tenantID, projectID shared.ID) (projectanalysis.Analysis, []byte, error)
+	LatestForProjects(ctx context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]projectanalysis.Analysis, error)
 	List(ctx context.Context, tenantID, projectID shared.ID, limit int, beforeCreatedAt time.Time, beforeID shared.ID) ([]projectanalysis.Analysis, bool, error)
 	Get(ctx context.Context, tenantID, projectID, analysisID shared.ID) (projectanalysis.Analysis, error)
 }
@@ -272,6 +286,7 @@ type ScanJob struct {
 
 // ScanJobStore persists scan-job status (upserted as the pipeline progresses).
 type ScanJobStore interface {
+	CreateRunning(ctx context.Context, job ScanJob) error
 	Save(ctx context.Context, job ScanJob) error
 	LatestForEngagement(ctx context.Context, engagementID shared.ID) (ScanJob, error)
 	// GetJob returns a scan job by its own id (shared.ErrNotFound if absent). Used to

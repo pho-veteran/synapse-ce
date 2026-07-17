@@ -23,11 +23,12 @@ type projectService interface {
 	Create(context.Context, projectuc.CreateInput) (*project.Project, error)
 	CreateFromArchive(context.Context, projectuc.CreateInput, string, io.Reader) (*project.Project, error)
 	List(context.Context, shared.ID) ([]*project.Project, error)
+	ListSummaries(context.Context, shared.ID) ([]projectuc.ProjectSummary, error)
 	Get(context.Context, shared.ID, string) (*project.Project, error)
 	AssignGate(context.Context, string, shared.ID, string, string) (*project.Project, error)
 	StartAnalysis(context.Context, string, shared.ID, string, *measure.CoverageReport) (ports.ScanJob, error)
 	AnalysisStatus(context.Context, shared.ID, string) (ports.ScanJob, error)
-	LatestAnalysis(context.Context, shared.ID, string) ([]byte, error)
+	LatestAnalysis(context.Context, shared.ID, string) (projectuc.LatestAnalysis, error)
 	ListAnalyses(context.Context, shared.ID, string, int, time.Time, shared.ID) ([]projectanalysis.Analysis, bool, error)
 	GetAnalysis(context.Context, shared.ID, string, string) (projectanalysis.Analysis, error)
 }
@@ -83,13 +84,73 @@ func (rt *Router) createProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, p)
 }
 
+type projectSummaryAnalysisResponse struct {
+	ID           string                   `json:"id"`
+	CreatedAt    time.Time                `json:"created_at"`
+	SourceCommit string                   `json:"source_commit,omitempty"`
+	GatePassed   bool                     `json:"gate_passed"`
+	GateInfo     projectanalysis.GateInfo `json:"gate_info"`
+	Issues       projectanalysis.Counts   `json:"issues"`
+	NewIssues    int                      `json:"new_issues"`
+	Rating       struct {
+		Security        string `json:"security"`
+		Reliability     string `json:"reliability"`
+		Maintainability string `json:"maintainability"`
+	} `json:"rating"`
+}
+
+type projectSummaryJobResponse struct {
+	ID         string           `json:"id"`
+	Status     ports.ScanStatus `json:"status"`
+	Stage      string           `json:"stage"`
+	Progress   int              `json:"progress"`
+	Error      string           `json:"error,omitempty"`
+	StartedAt  time.Time        `json:"started_at"`
+	FinishedAt *time.Time       `json:"finished_at,omitempty"`
+}
+
+type projectSummaryResponse struct {
+	ID                   shared.ID                       `json:"ID"`
+	TenantID             shared.ID                       `json:"TenantID"`
+	Name                 string                          `json:"Name"`
+	Key                  string                          `json:"Key"`
+	SourceBinding        project.SourceBinding           `json:"SourceBinding"`
+	DefaultProfileByLang map[string]string               `json:"DefaultProfileByLang"`
+	GateID               string                          `json:"GateID"`
+	Audit                shared.Audit                    `json:"Audit"`
+	LatestAnalysis       *projectSummaryAnalysisResponse `json:"latest_analysis"`
+	LatestJob            *projectSummaryJobResponse      `json:"latest_job"`
+}
+
 func (rt *Router) listProjects(w http.ResponseWriter, r *http.Request) {
-	list, err := rt.projects.List(r.Context(), shared.ID(TenantFrom(r.Context())))
+	list, err := rt.projects.ListSummaries(r.Context(), shared.ID(TenantFrom(r.Context())))
 	if err != nil {
 		writeError(w, rt.log, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	out := make([]projectSummaryResponse, len(list))
+	for i, summary := range list {
+		p := summary.Project
+		out[i] = projectSummaryResponse{ID: p.ID, TenantID: p.TenantID, Name: p.Name, Key: p.Key, SourceBinding: p.SourceBinding, DefaultProfileByLang: p.DefaultProfileByLang, GateID: p.GateID, Audit: p.Audit}
+		if summary.LatestAnalysis != nil {
+			analysis := summary.LatestAnalysis
+			out[i].LatestAnalysis = &projectSummaryAnalysisResponse{
+				ID: analysis.ID, CreatedAt: analysis.CreatedAt, SourceCommit: analysis.SourceCommit,
+				GatePassed: analysis.Gate.Passed, GateInfo: analysis.GateInfo, Issues: analysis.Issues,
+				NewIssues: analysis.NewCode.Counts.Total,
+				Rating: struct {
+					Security        string `json:"security"`
+					Reliability     string `json:"reliability"`
+					Maintainability string `json:"maintainability"`
+				}{Security: string(analysis.Rating.Security), Reliability: string(analysis.Rating.Reliability), Maintainability: string(analysis.Rating.Maintainability)},
+			}
+		}
+		if summary.LatestJob != nil {
+			job := summary.LatestJob
+			out[i].LatestJob = &projectSummaryJobResponse{ID: job.ID, Status: job.Status, Stage: job.Stage, Progress: job.Progress, Error: job.Error, StartedAt: job.StartedAt, FinishedAt: job.FinishedAt}
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (rt *Router) getProject(w http.ResponseWriter, r *http.Request) {
@@ -191,19 +252,21 @@ func (rt *Router) projectAnalysisStatus(w http.ResponseWriter, r *http.Request) 
 }
 
 func (rt *Router) latestProjectAnalysis(w http.ResponseWriter, r *http.Request) {
-	data, err := rt.projects.LatestAnalysis(r.Context(), shared.ID(TenantFrom(r.Context())), r.PathValue("key"))
+	latest, err := rt.projects.LatestAnalysis(r.Context(), shared.ID(TenantFrom(r.Context())), r.PathValue("key"))
 	if err != nil {
 		writeError(w, rt.log, err)
 		return
 	}
-	data, err = redactProjectAnalysisEngagementIDs(data)
+	data, err := redactProjectAnalysisEngagementIDs(latest.Result)
 	if err != nil {
 		writeError(w, rt.log, fmt.Errorf("sanitize project analysis: %w", err))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	var result json.RawMessage = data
+	writeJSON(w, http.StatusOK, struct {
+		Analysis projectAnalysisResponse `json:"analysis"`
+		Result   json.RawMessage         `json:"result"`
+	}{Analysis: projectAnalysisDTO(latest.Analysis), Result: result})
 }
 
 func redactProjectAnalysisEngagementIDs(data []byte) ([]byte, error) {

@@ -601,6 +601,8 @@ export interface Project {
   defaultProfileByLang: Record<string, string>
   gateId: string
   createdAt: string | null
+  latestAnalysis: ProjectAnalysis | null
+  latestJob: ScanJob | null
 }
 
 export interface CreateProjectInput {
@@ -651,7 +653,7 @@ export interface DuplicationSummary {
   files: number
 }
 
-export type Grade = 'A' | 'B' | 'C' | 'D' | 'E'
+export type Grade = 'A' | 'B' | 'C' | 'D' | 'E' | '?'
 
 export interface CodeRating {
   security: Grade
@@ -693,14 +695,21 @@ export interface ProjectGateResult {
   results: ProjectGateCondition[]
 }
 
+export interface ProjectGateInfo {
+  key: string
+  name: string
+  source: 'managed' | 'repository' | 'default' | ''
+}
+
 export interface ProjectAnalysis {
   id: string
   createdAt: string
   sourceRef: string
   sourceCommit: string
   gate: ProjectGateResult
+  gateInfo: ProjectGateInfo
   issues: ProjectIssueCounts
-  newCode: { previousId: string; counts: ProjectIssueCounts; rating: CodeRating }
+  newCode: { previousId: string; counts: ProjectIssueCounts; rating: { security: Grade; reliability: Grade; maintainability: Grade | null } }
   delta: { issues: ProjectIssueCounts; measures: Record<string, number>; ratings: Record<string, number> } | null
   measures: Record<string, number>
   coverage: { coveredLines: number; totalLines: number } | null
@@ -716,6 +725,11 @@ export interface ProjectAnalysisCursor {
 export interface ProjectAnalysisPage {
   items: ProjectAnalysis[]
   next: ProjectAnalysisCursor | null
+}
+
+export interface LatestProjectAnalysis {
+  analysis: ProjectAnalysis
+  result: ScanResult
 }
 
 // --- Rules API ---

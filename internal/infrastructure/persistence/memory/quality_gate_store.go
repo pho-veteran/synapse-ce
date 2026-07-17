@@ -88,3 +88,7 @@ func (s *QualityGateStore) Delete(_ context.Context, tenantID shared.ID, key str
 	delete(s.data, key)
 	return nil
 }
+
+func (s *QualityGateStore) DeleteIfUnassigned(ctx context.Context, tenantID shared.ID, key string) error {
+	return s.Delete(ctx, tenantID, key)
+}

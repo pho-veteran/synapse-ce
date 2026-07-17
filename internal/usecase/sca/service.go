@@ -1096,10 +1096,8 @@ func (s *Service) StartScanWithOptions(ctx context.Context, actor string, engage
 		StartedAt:    now,
 		DebugEvents:  []ports.ScanDebugEvent{},
 	}
-	if s.jobs != nil {
-		if err := s.jobs.Save(ctx, job); err != nil {
-			return ports.ScanJob{}, fmt.Errorf("create scan job: %w", err)
-		}
+	if err := s.jobs.CreateRunning(ctx, job); err != nil {
+		return ports.ScanJob{}, fmt.Errorf("create scan job: %w", err)
 	}
 	// defer to the durable queue when configured (an in-process or separate worker
 	// claims + runs the pipeline with syft/grype sandboxed) – replaces the bare goroutine,
@@ -1110,6 +1108,9 @@ func (s *Service) StartScanWithOptions(ctx context.Context, actor string, engage
 			return ports.ScanJob{}, fmt.Errorf("marshal scan job: %w", mErr)
 		}
 		if _, err := s.jobQueue.Enqueue(ctx, ScanJobKind, payload); err != nil {
+			fin := s.clock.Now()
+			job.Status, job.Stage, job.Error, job.FinishedAt = ports.ScanFailed, "enqueue", truncateErr(err), &fin
+			_ = s.jobs.Save(context.Background(), job)
 			return ports.ScanJob{}, fmt.Errorf("enqueue scan job: %w", err)
 		}
 		return job, nil
@@ -1254,6 +1255,29 @@ func (s *Service) LatestJob(ctx context.Context, engagementID shared.ID) (ports.
 		return ports.ScanJob{}, fmt.Errorf("scan job: %w", shared.ErrNotFound)
 	}
 	return s.jobs.LatestForEngagement(ctx, engagementID)
+}
+
+func (s *Service) LatestJobs(ctx context.Context, engagementIDs []shared.ID) (map[shared.ID]ports.ScanJob, error) {
+	if s.jobs == nil {
+		return map[shared.ID]ports.ScanJob{}, nil
+	}
+	if store, ok := s.jobs.(interface {
+		LatestForEngagements(context.Context, []shared.ID) (map[shared.ID]ports.ScanJob, error)
+	}); ok {
+		return store.LatestForEngagements(ctx, engagementIDs)
+	}
+	out := map[shared.ID]ports.ScanJob{}
+	for _, id := range engagementIDs {
+		job, err := s.jobs.LatestForEngagement(ctx, id)
+		if errors.Is(err, shared.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out[id] = job
+	}
+	return out, nil
 }
 
 // gateAndAudit enforces scope + the authorization window and records the

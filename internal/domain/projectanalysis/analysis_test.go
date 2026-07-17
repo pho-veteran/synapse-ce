@@ -34,6 +34,16 @@ func TestBuildFirstAnalysisTreatsEveryIssueAsNew(t *testing.T) {
 	}
 }
 
+func TestBuildRecordsDefaultGateInfo(t *testing.T) {
+	analysis, err := Build(Input{ID: "a1", TenantID: "tenant", ProjectID: "project", ProjectKey: "demo", CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.GateInfo.Key != qualitygate.DefaultKey || analysis.GateInfo.Name != "Synapse way" || analysis.GateInfo.Source != "default" {
+		t.Fatalf("gate info=%+v", analysis.GateInfo)
+	}
+}
+
 func TestBuildUsesProvidedGate(t *testing.T) {
 	analysis, err := Build(Input{
 		ID: "a1", TenantID: "tenant", ProjectID: "project", ProjectKey: "demo", CreatedAt: time.Now(),
@@ -45,6 +55,23 @@ func TestBuildUsesProvidedGate(t *testing.T) {
 	}
 	if !analysis.Gate.Passed || len(analysis.Gate.Results) != 1 {
 		t.Fatalf("provided gate was not evaluated: %+v", analysis.Gate)
+	}
+}
+
+func TestBuildLeavesNewCodeMaintainabilityUnavailableWithoutDiffLines(t *testing.T) {
+	base, err := Build(Input{ID: "a1", TenantID: "tenant", ProjectID: "project", ProjectKey: "demo", CreatedAt: time.Now(), LinesOfCode: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := Build(Input{
+		ID: "a2", TenantID: "tenant", ProjectID: "project", ProjectKey: "demo", CreatedAt: time.Now(), LinesOfCode: 10100, Previous: &base,
+		Findings: []finding.Finding{{ID: "quality", DedupKey: "quality", Kind: finding.KindQuality, Severity: shared.SeverityHigh, Status: finding.StatusOpen}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.NewCode.Rating.Maintainability != nil || current.NewCode.Rating.Security != "A" || current.NewCode.Rating.Reliability != "A" {
+		t.Fatalf("new code=%+v", current.NewCode)
 	}
 }
 

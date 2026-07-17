@@ -3,18 +3,7 @@ import { Braces, Copy, FileCode2, Gauge, ShieldCheck, Wrench } from 'lucide-reac
 import type { CodeQualityReport, Finding, Grade, LanguageInventory } from '../../lib/types'
 import { Card, Pill, SevBadge, cn } from '../ui'
 import { VirtualTable, type Column } from '../VirtualTable'
-
-function gradeTone(grade: Grade): string {
-  switch (grade) {
-    case 'A':
-    case 'B':
-      return 'border-low/25 bg-low/10 text-low'
-    case 'C':
-      return 'border-medium/25 bg-medium/10 text-medium'
-    default:
-      return 'border-critical/25 bg-critical/10 text-critical'
-  }
-}
+import { gradeTone } from './qualityPresentation'
 
 function GradeCard({ label, grade, detail, icon: Icon }: { label: string; grade: Grade; detail: string; icon: typeof Gauge }) {
   return (

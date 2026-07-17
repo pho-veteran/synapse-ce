@@ -12,13 +12,22 @@ import (
 )
 
 type Service struct {
-	store ports.QualityGateStore
-	audit ports.AuditLogger
-	clock ports.Clock
+	store   ports.QualityGateStore
+	mutator ports.QualityGateMutator
+	clock   ports.Clock
 }
 
-func NewService(store ports.QualityGateStore, audit ports.AuditLogger, clock ports.Clock) *Service {
-	return &Service{store: store, audit: audit, clock: clock}
+func NewService(store ports.QualityGateStore, _ ports.AuditLogger, clock ports.Clock) *Service {
+	return &Service{store: store, clock: clock}
+}
+
+func (s *Service) SetMutator(mutator ports.QualityGateMutator) { s.mutator = mutator }
+
+func (s *Service) requireMutator() error {
+	if s.mutator == nil {
+		return fmt.Errorf("%w: quality gate mutations are not configured", shared.ErrValidation)
+	}
+	return nil
 }
 
 func (s *Service) List(ctx context.Context, tenantID shared.ID) ([]qualitygate.Gate, error) {
@@ -51,11 +60,11 @@ func (s *Service) Create(ctx context.Context, actor string, tenantID shared.ID, 
 	if _, builtIn := qualitygate.Resolve(gate.Key); builtIn {
 		return qualitygate.Gate{}, fmt.Errorf("%w: quality gate key is reserved", shared.ErrValidation)
 	}
-	if err := s.store.Create(ctx, tenantID, gate); err != nil {
-		return qualitygate.Gate{}, fmt.Errorf("create quality gate: %w", err)
+	if err := s.requireMutator(); err != nil {
+		return qualitygate.Gate{}, err
 	}
-	if err := s.audit.Record(ctx, ports.AuditEntry{Actor: actor, Action: "quality_gate.create", Target: gate.Key, Metadata: map[string]string{"gate": gate.Key}, At: s.clock.Now()}); err != nil {
-		return qualitygate.Gate{}, fmt.Errorf("audit quality gate create: %w", err)
+	if err := s.mutator.CreateGate(ctx, tenantID, gate, ports.AuditEntry{Actor: actor, Action: "quality_gate.create", Target: gate.Key, Metadata: map[string]string{"gate": gate.Key}, At: s.clock.Now()}); err != nil {
+		return qualitygate.Gate{}, fmt.Errorf("create quality gate: %w", err)
 	}
 	return gate, nil
 }
@@ -72,11 +81,11 @@ func (s *Service) Update(ctx context.Context, actor string, tenantID shared.ID, 
 	if _, builtIn := qualitygate.Resolve(gate.Key); builtIn {
 		return qualitygate.Gate{}, fmt.Errorf("%w: built-in quality gates cannot be edited", shared.ErrValidation)
 	}
-	if err := s.store.Update(ctx, tenantID, gate); err != nil {
-		return qualitygate.Gate{}, fmt.Errorf("update quality gate: %w", err)
+	if err := s.requireMutator(); err != nil {
+		return qualitygate.Gate{}, err
 	}
-	if err := s.audit.Record(ctx, ports.AuditEntry{Actor: actor, Action: "quality_gate.update", Target: gate.Key, Metadata: map[string]string{"gate": gate.Key}, At: s.clock.Now()}); err != nil {
-		return qualitygate.Gate{}, fmt.Errorf("audit quality gate update: %w", err)
+	if err := s.mutator.UpdateGate(ctx, tenantID, gate, ports.AuditEntry{Actor: actor, Action: "quality_gate.update", Target: gate.Key, Metadata: map[string]string{"gate": gate.Key}, At: s.clock.Now()}); err != nil {
+		return qualitygate.Gate{}, fmt.Errorf("update quality gate: %w", err)
 	}
 	return gate, nil
 }
@@ -89,11 +98,11 @@ func (s *Service) Delete(ctx context.Context, actor string, tenantID shared.ID, 
 	if _, builtIn := qualitygate.Resolve(key); builtIn {
 		return fmt.Errorf("%w: built-in quality gates cannot be deleted", shared.ErrValidation)
 	}
-	if err := s.store.Delete(ctx, tenantID, key); err != nil {
-		return fmt.Errorf("delete quality gate: %w", err)
+	if err := s.requireMutator(); err != nil {
+		return err
 	}
-	if err := s.audit.Record(ctx, ports.AuditEntry{Actor: actor, Action: "quality_gate.delete", Target: key, Metadata: map[string]string{"gate": key}, At: s.clock.Now()}); err != nil {
-		return fmt.Errorf("audit quality gate delete: %w", err)
+	if err := s.mutator.DeleteGate(ctx, tenantID, key, ports.AuditEntry{Actor: actor, Action: "quality_gate.delete", Target: key, Metadata: map[string]string{"gate": key}, At: s.clock.Now()}); err != nil {
+		return fmt.Errorf("delete quality gate: %w", err)
 	}
 	return nil
 }

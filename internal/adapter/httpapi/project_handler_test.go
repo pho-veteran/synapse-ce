@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/measure"
+	"github.com/KKloudTarus/synapse-ce/internal/domain/projectanalysis"
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/infrastructure/persistence/memory"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/ports"
@@ -21,12 +22,12 @@ import (
 
 type projectAnalysisServiceStub struct {
 	projectService
-	data []byte
-	err  error
+	latest projectuc.LatestAnalysis
+	err    error
 }
 
-func (s projectAnalysisServiceStub) LatestAnalysis(context.Context, shared.ID, string) ([]byte, error) {
-	return s.data, s.err
+func (s projectAnalysisServiceStub) LatestAnalysis(context.Context, shared.ID, string) (projectuc.LatestAnalysis, error) {
+	return s.latest, s.err
 }
 
 type coverageStartStub struct {
@@ -121,7 +122,7 @@ func TestLatestProjectAnalysisHidesInternalEngagement(t *testing.T) {
 		"findings":[{"Title":"top-level finding","EngagementID":"hidden-top-level-engagement","future_finding":"keep-top"}],
 		"code_quality":{"future_report":"keep-report","findings":[{"Title":"quality finding","engagement_id":"hidden-code-quality-engagement","future_finding":"keep-quality"}]}
 	}`)
-	rt := &Router{log: discardLog(), projects: projectAnalysisServiceStub{data: data}}
+	rt := &Router{log: discardLog(), projects: projectAnalysisServiceStub{latest: projectuc.LatestAnalysis{Analysis: projectanalysis.Analysis{ID: "job-1"}, Result: data}}}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/project/analysis", nil)
 	req.SetPathValue("key", "project")
 	req = req.WithContext(context.WithValue(req.Context(), principalKey, Principal{ID: "alice", TenantID: "tenant-a"}))
@@ -146,7 +147,7 @@ func TestLatestProjectAnalysisHidesInternalEngagement(t *testing.T) {
 }
 
 func TestLatestProjectAnalysisRejectsMalformedCache(t *testing.T) {
-	rt := &Router{log: discardLog(), projects: projectAnalysisServiceStub{data: []byte(`{"findings":"not-an-array","secret":"must-not-leak"}`)}}
+	rt := &Router{log: discardLog(), projects: projectAnalysisServiceStub{latest: projectuc.LatestAnalysis{Analysis: projectanalysis.Analysis{ID: "job-1"}, Result: []byte(`{"findings":"not-an-array","secret":"must-not-leak"}`)}}}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/project/analysis", nil)
 	req.SetPathValue("key", "project")
 	rec := httptest.NewRecorder()

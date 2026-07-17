@@ -76,6 +76,30 @@ func (r *EngagementRepository) Create(ctx context.Context, e *engagement.Engagem
 // full scope target set, replaced atomically in one transaction (E1 scope CRUD +
 // lifecycle). Returns shared.ErrNotFound if the engagement does not exist. Unlike
 // Create's deterministic scope PKs, the replace path uses generated IDs.
+func (r *EngagementRepository) ProjectContexts(ctx context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]*engagement.Engagement, error) {
+	ids := make([]string, len(projectIDs))
+	for i, id := range projectIDs {
+		ids[i] = id.String()
+	}
+	if len(ids) == 0 {
+		return map[shared.ID]*engagement.Engagement{}, nil
+	}
+	rows, err := r.pool.Query(ctx, `SELECT `+engagementCols+` FROM engagements WHERE tenant_id=$1 AND project_id = ANY($2)`, tenantID.String(), ids)
+	if err != nil {
+		return nil, fmt.Errorf("list project contexts: %w", err)
+	}
+	defer rows.Close()
+	out := map[shared.ID]*engagement.Engagement{}
+	for rows.Next() {
+		e, err := scanEngagement(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[e.ProjectID] = e
+	}
+	return out, rows.Err()
+}
+
 func (r *EngagementRepository) Update(ctx context.Context, e *engagement.Engagement) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

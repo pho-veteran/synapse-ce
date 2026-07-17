@@ -660,6 +660,16 @@ type fakeJobStore struct {
 
 func newFakeJobStore() *fakeJobStore { return &fakeJobStore{jobs: map[string]ports.ScanJob{}} }
 
+func (f *fakeJobStore) CreateRunning(_ context.Context, j ports.ScanJob) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if current, ok := f.jobs[j.EngagementID]; ok && current.Status == ports.ScanRunning {
+		return shared.ErrConflict
+	}
+	f.jobs[j.EngagementID] = j
+	return nil
+}
+
 func (f *fakeJobStore) Save(_ context.Context, j ports.ScanJob) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -718,6 +728,16 @@ func (r *contextRecorder) RecordProjectAnalysis(ctx context.Context, _ shared.ID
 	r.called = true
 	r.live = ctx.Err() == nil
 	return r.err
+}
+
+func TestStartScanRejectsConcurrentRunningJob(t *testing.T) {
+	jobs := newFakeJobStore()
+	if err := jobs.CreateRunning(context.Background(), ports.ScanJob{ID: "first", EngagementID: "e1", Status: ports.ScanRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.CreateRunning(context.Background(), ports.ScanJob{ID: "second", EngagementID: "e1", Status: ports.ScanRunning}); !errors.Is(err, shared.ErrConflict) {
+		t.Fatalf("second running job error=%v, want conflict", err)
+	}
 }
 
 func TestStartScanAsyncCompletes(t *testing.T) {

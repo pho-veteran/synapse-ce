@@ -33,6 +33,7 @@ type projectAnalysisResponse struct {
 	SourceRef    string                    `json:"source_ref,omitempty"`
 	SourceCommit string                    `json:"source_commit,omitempty"`
 	Gate         projectGateResponse       `json:"gate"`
+	GateInfo     projectanalysis.GateInfo  `json:"gate_info"`
 	Issues       projectanalysis.Counts    `json:"issues"`
 	NewCode      projectanalysis.NewCode   `json:"new_code"`
 	Delta        *projectanalysis.Delta    `json:"delta"`
@@ -49,7 +50,7 @@ func projectAnalysisDTO(analysis projectanalysis.Analysis) projectAnalysisRespon
 	}
 	return projectAnalysisResponse{
 		ID: analysis.ID, CreatedAt: analysis.CreatedAt, SourceRef: analysis.SourceRef, SourceCommit: analysis.SourceCommit,
-		Gate: gate, Issues: analysis.Issues, NewCode: analysis.NewCode, Delta: analysis.Delta,
+		Gate: gate, GateInfo: analysis.GateInfo, Issues: analysis.Issues, NewCode: analysis.NewCode, Delta: analysis.Delta,
 		Measures: analysis.Measures, Coverage: analysis.Coverage, Duplication: analysis.Duplication, Rating: analysis.Rating,
 	}
 }

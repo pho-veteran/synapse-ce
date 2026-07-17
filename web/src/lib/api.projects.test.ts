@@ -6,11 +6,17 @@ describe('Projects API', () => {
 
   beforeEach(() => { fetchSpy = vi.spyOn(globalThis, 'fetch') })
 
-  it('maps project fields', async () => {
-    fetchSpy.mockResolvedValueOnce({ ok: true, status: 200, json: async () => [{ ID: 'p1', Name: 'Synapse', Key: 'synapse', SourceBinding: { Kind: 'git', Value: 'https://example.com/repo.git', Ref: 'main' }, DefaultProfileByLang: { go: 'default' }, GateID: 'gate', Audit: { CreatedAt: '2026-07-15T00:00:00Z' } }] } as Response)
+  it('maps project fields and portfolio summaries', async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true, status: 200, json: async () => [{ ID: 'p1', Name: 'Synapse', Key: 'synapse', SourceBinding: { Kind: 'git', Value: 'https://example.com/repo.git', Ref: 'main' }, DefaultProfileByLang: { go: 'default' }, GateID: 'gate', Audit: { CreatedAt: '2026-07-15T00:00:00Z' }, latest_analysis: { id: 'a1', gate: { passed: false, results: [] }, gate_info: { key: 'release', name: 'Release', source: 'managed' } }, latest_job: { id: 'j1', status: 'succeeded' } }] } as Response)
     const projects = await api.listProjects()
-    expect(projects[0]).toMatchObject({ id: 'p1', key: 'synapse', gateId: 'gate', sourceBinding: { kind: 'git', ref: 'main' } })
+    expect(projects[0]).toMatchObject({ id: 'p1', key: 'synapse', gateId: 'gate', sourceBinding: { kind: 'git', ref: 'main' }, latestAnalysis: { id: 'a1', gateInfo: { name: 'Release', source: 'managed' } }, latestJob: { id: 'j1', status: 'succeeded' } })
     expect(fetchSpy).toHaveBeenCalledWith('/api/v1/projects', expect.any(Object))
+  })
+
+  it('marks absent engagement code-quality grades as unavailable', async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ available: true, report: {} }) } as Response)
+    const view = await api.codeQuality('e1')
+    expect(view).toMatchObject({ available: true, report: { rating: { security: '?', reliability: '?', maintainability: '?' } } })
   })
 
   it('creates with the backend source and gate contract', async () => {
@@ -60,7 +66,7 @@ describe('Projects API', () => {
       next: { before_created_at: '2026-07-16T00:00:00Z', before_id: 'a0' },
     }) } as Response)
     const page = await api.projectAnalyses('a b', { beforeCreatedAt: '2026-07-18T00:00:00Z', beforeId: 'a2' })
-    expect(page.items[0]).toMatchObject({ id: 'a1', coverage: null })
+    expect(page.items[0]).toMatchObject({ id: 'a1', coverage: null, rating: { security: '?', reliability: '?', maintainability: '?' }, newCode: { rating: { security: '?', reliability: '?', maintainability: null } } })
     expect(page.next).toEqual({ beforeCreatedAt: '2026-07-16T00:00:00Z', beforeId: 'a0' })
     expect(fetchSpy).toHaveBeenCalledWith('/api/v1/projects/a%20b/analyses?limit=25&before_created_at=2026-07-18T00%3A00%3A00Z&before_id=a2', expect.any(Object))
   })

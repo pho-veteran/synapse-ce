@@ -16,32 +16,82 @@ import (
 )
 
 // ProjectAnalysisStore is an append-only in-memory Project analysis store.
+type storedProjectAnalysis struct {
+	analysis projectanalysis.Analysis
+	result   []byte
+}
+
 type ProjectAnalysisStore struct {
 	mu   sync.RWMutex
-	data []projectanalysis.Analysis
+	data []storedProjectAnalysis
 }
 
 func NewProjectAnalysisStore() *ProjectAnalysisStore { return &ProjectAnalysisStore{} }
 
 var _ ports.ProjectAnalysisStore = (*ProjectAnalysisStore)(nil)
 
-func (s *ProjectAnalysisStore) Save(_ context.Context, analysis projectanalysis.Analysis) error {
+func (s *ProjectAnalysisStore) Save(ctx context.Context, analysis projectanalysis.Analysis) error {
+	return s.SaveWithResult(ctx, analysis, nil)
+}
+
+func (s *ProjectAnalysisStore) SaveWithResult(_ context.Context, analysis projectanalysis.Analysis, result []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, current := range s.data {
-		if current.ID == analysis.ID {
+		if current.analysis.ID == analysis.ID {
 			return nil
 		}
 	}
-	s.data = append(s.data, cloneProjectAnalysis(analysis))
+	s.data = append(s.data, storedProjectAnalysis{analysis: cloneProjectAnalysis(analysis), result: slices.Clone(result)})
 	return nil
+}
+
+func (s *ProjectAnalysisStore) LatestForProjects(_ context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]projectanalysis.Analysis, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	wanted := map[shared.ID]bool{}
+	for _, id := range projectIDs {
+		wanted[id] = true
+	}
+	out := map[shared.ID]projectanalysis.Analysis{}
+	for _, stored := range s.data {
+		analysis := stored.analysis
+		id := shared.ID(analysis.ProjectID)
+		if !wanted[id] || (!tenantID.IsZero() && analysis.TenantID != tenantID.String()) {
+			continue
+		}
+		if current, ok := out[id]; !ok || analysis.CreatedAt.After(current.CreatedAt) || (analysis.CreatedAt.Equal(current.CreatedAt) && analysis.ID > current.ID) {
+			out[id] = cloneProjectAnalysis(analysis)
+		}
+	}
+	return out, nil
+}
+
+func (s *ProjectAnalysisStore) LatestWithResult(_ context.Context, tenantID, projectID shared.ID) (projectanalysis.Analysis, []byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var latest *storedProjectAnalysis
+	for i := range s.data {
+		current := &s.data[i]
+		if current.analysis.ProjectID != projectID.String() || (!tenantID.IsZero() && current.analysis.TenantID != tenantID.String()) {
+			continue
+		}
+		if latest == nil || current.analysis.CreatedAt.After(latest.analysis.CreatedAt) || (current.analysis.CreatedAt.Equal(latest.analysis.CreatedAt) && current.analysis.ID > latest.analysis.ID) {
+			latest = current
+		}
+	}
+	if latest == nil || len(latest.result) == 0 {
+		return projectanalysis.Analysis{}, nil, shared.ErrNotFound
+	}
+	return cloneProjectAnalysis(latest.analysis), slices.Clone(latest.result), nil
 }
 
 func (s *ProjectAnalysisStore) List(_ context.Context, tenantID, projectID shared.ID, limit int, beforeCreatedAt time.Time, beforeID shared.ID) ([]projectanalysis.Analysis, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]projectanalysis.Analysis, 0)
-	for _, analysis := range s.data {
+	for _, stored := range s.data {
+		analysis := stored.analysis
 		if analysis.ProjectID != projectID.String() || (!tenantID.IsZero() && analysis.TenantID != tenantID.String()) {
 			continue
 		}
@@ -106,7 +156,8 @@ func cloneDuplication(in measure.DuplicationReport) measure.DuplicationReport {
 func (s *ProjectAnalysisStore) Get(_ context.Context, tenantID, projectID, analysisID shared.ID) (projectanalysis.Analysis, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, analysis := range s.data {
+	for _, stored := range s.data {
+		analysis := stored.analysis
 		if analysis.ID == analysisID.String() && analysis.ProjectID == projectID.String() && (tenantID.IsZero() || analysis.TenantID == tenantID.String()) {
 			return cloneProjectAnalysis(analysis), nil
 		}

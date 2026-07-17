@@ -174,6 +174,7 @@ func main() {
 	var scanRunStore ports.ScanRunStore
 	var projectAnalysisStore ports.ProjectAnalysisStore
 	var qualityGateStore ports.QualityGateStore
+	var qualityGateMutator ports.QualityGateMutator
 	var reconRunStore ports.ReconRunStore
 	var evidenceStore ports.EvidenceStore
 	var advisoryStore ports.AdvisoryStore         // owned normalized-advisory store (global reference data, not tenant-scoped)
@@ -280,6 +281,7 @@ func main() {
 		aupStore = postgres.NewAUPStore(pool)
 		pgAudit := postgres.NewAuditLog(pool)
 		auditLog, auditReader = pgAudit, pgAudit
+		qualityGateMutator = postgres.NewQualityGateMutator(pool)
 		timestampStore = postgres.NewTimestampStore(pool)
 		credVault = vault.NewPostgresVault(pool, vaultCipher)
 		reconQueue = postgres.NewJobQueue(pool, ids)
@@ -316,6 +318,7 @@ func main() {
 		aupStore = file.NewAUPStore(cfg.AUPFile)
 		fileAudit := file.NewAuditLog(cfg.AuditFile)
 		auditLog, auditReader = fileAudit, fileAudit
+		qualityGateMutator = memory.NewQualityGateMutator(qualityGateStore.(*memory.QualityGateStore), projectRepo.(*memory.ProjectRepository), auditLog)
 		timestampStore = memory.NewTimestampStore()
 		credVault = vault.NewMemoryVault(vaultCipher, nil)
 		agentSessionStore = memory.NewAgentSessionStore()
@@ -342,7 +345,9 @@ func main() {
 	projectService.SetAnalysisStore(projectAnalysisStore)
 	projectService.SetFindingRepository(findingRepo)
 	qualityGateService := qualitygatesuc.NewService(qualityGateStore, auditLog, clock)
+	qualityGateService.SetMutator(qualityGateMutator)
 	projectService.SetQualityGates(qualityGateService)
+	projectService.SetQualityGateMutator(qualityGateMutator)
 	// Evidence artifact blob store: MinIO/S3 when configured, else in-memory (dev).
 	var blobStore ports.BlobStore
 	if cfg.BlobEndpoint != "" {

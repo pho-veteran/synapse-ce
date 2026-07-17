@@ -69,6 +69,22 @@ func (r *EngagementRepository) GetByProjectID(_ context.Context, tenantID, proje
 	return nil, shared.ErrNotFound
 }
 
+func (r *EngagementRepository) ProjectContexts(_ context.Context, tenantID shared.ID, projectIDs []shared.ID) (map[shared.ID]*engagement.Engagement, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	wanted := map[shared.ID]bool{}
+	for _, id := range projectIDs {
+		wanted[id] = true
+	}
+	out := map[shared.ID]*engagement.Engagement{}
+	for _, e := range r.data {
+		if wanted[e.ProjectID] && (tenantID.IsZero() || e.TenantID == tenantID) {
+			out[e.ProjectID] = e
+		}
+	}
+	return out, nil
+}
+
 func (r *EngagementRepository) Update(_ context.Context, e *engagement.Engagement) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

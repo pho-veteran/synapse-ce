@@ -55,6 +55,23 @@ func TestProjectAnalysisStoreClonesMutableSnapshots(t *testing.T) {
 	}
 }
 
+func TestProjectAnalysisStoreLatestResultStaysWithSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := NewProjectAnalysisStore()
+	old := projectanalysis.Analysis{ID: "old", TenantID: "tenant", ProjectID: "project", CreatedAt: time.Unix(1, 0)}
+	latest := projectanalysis.Analysis{ID: "latest", TenantID: "tenant", ProjectID: "project", CreatedAt: time.Unix(2, 0)}
+	if err := store.SaveWithResult(ctx, old, []byte(`{"run":"old"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveWithResult(ctx, latest, []byte(`{"run":"latest"}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, result, err := store.LatestWithResult(ctx, "tenant", "project")
+	if err != nil || got.ID != "latest" || string(result) != `{"run":"latest"}` {
+		t.Fatalf("analysis=%+v result=%s err=%v", got, result, err)
+	}
+}
+
 func TestProjectAnalysisStoreScopesAndOrdersSnapshots(t *testing.T) {
 	ctx := context.Background()
 	store := NewProjectAnalysisStore()

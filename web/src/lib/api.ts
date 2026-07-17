@@ -17,6 +17,7 @@ import type {
   ProjectAnalysis,
   ProjectAnalysisCursor,
   ProjectAnalysisPage,
+  LatestProjectAnalysis,
   EvidenceItem,
   EvidenceLedger,
   Finding,
@@ -46,6 +47,7 @@ import type {
   RuleSeverity,
   RuleDetection,
   QualityGate,
+  Grade,
 } from './types'
 
 export class ApiError extends Error {
@@ -121,6 +123,8 @@ function mapProject(r: any): Project {
     defaultProfileByLang: r.DefaultProfileByLang ?? {},
     gateId: r.GateID ?? '',
     createdAt: r.Audit?.CreatedAt ?? null,
+    latestAnalysis: r.latest_analysis ? mapProjectSummaryAnalysis(r.latest_analysis) : null,
+    latestJob: r.latest_job ? mapScanJob(r.latest_job) : null,
   }
 }
 
@@ -543,9 +547,9 @@ function mapCodeQualityReport(rep: any): CodeQualityReport {
       files: rep?.duplication?.files ?? 0,
     },
     rating: {
-      security: (rep?.rating?.security ?? 'A') as CodeRating['security'],
-      reliability: (rep?.rating?.reliability ?? 'A') as CodeRating['reliability'],
-      maintainability: (rep?.rating?.maintainability ?? 'A') as CodeRating['maintainability'],
+      security: (rep?.rating?.security ?? '?') as CodeRating['security'],
+      reliability: (rep?.rating?.reliability ?? '?') as CodeRating['reliability'],
+      maintainability: (rep?.rating?.maintainability ?? '?') as CodeRating['maintainability'],
       techDebtMinutes: rep?.rating?.tech_debt_minutes ?? 0,
       debtRatioPct: rep?.rating?.debt_ratio_pct ?? 0,
       linesOfCode: rep?.rating?.lines_of_code ?? 0,
@@ -553,17 +557,24 @@ function mapCodeQualityReport(rep: any): CodeQualityReport {
   }
 }
 
+function mapProjectSummaryAnalysis(r: any): ProjectAnalysis {
+  const counts = (value: any) => ({ total: value?.total ?? 0, byKind: value?.by_kind ?? {}, bySeverity: value?.by_severity ?? {}, byStatus: value?.by_status ?? {} })
+  const grade = (value: any): CodeRating => ({ security: (value?.security ?? 'A') as CodeRating['security'], reliability: (value?.reliability ?? 'A') as CodeRating['reliability'], maintainability: (value?.maintainability ?? 'A') as CodeRating['maintainability'], techDebtMinutes: 0, debtRatioPct: 0, linesOfCode: 0 })
+  return { id: r.id ?? '', createdAt: r.created_at ?? '', sourceRef: '', sourceCommit: r.source_commit ?? '', gate: { passed: r.gate_passed ?? false, results: [] }, gateInfo: { key: r.gate_info?.key ?? '', name: r.gate_info?.name ?? 'Quality gate', source: r.gate_info?.source ?? '' }, issues: counts(r.issues), newCode: { previousId: '', counts: { ...counts(null), total: r.new_issues ?? 0 }, rating: { security: 'A', reliability: 'A', maintainability: null } }, delta: null, measures: {}, coverage: null, duplication: { blocks: [], duplicatedLines: 0, totalLines: 0, files: 0 }, rating: grade(r.rating) }
+}
+
 function mapProjectAnalysis(r: any): ProjectAnalysis {
   const counts = (value: any) => ({ total: value?.total ?? 0, byKind: value?.by_kind ?? {}, bySeverity: value?.by_severity ?? {}, byStatus: value?.by_status ?? {} })
   const rating = (value: any): CodeRating => ({
-    security: (value?.security ?? 'A') as CodeRating['security'], reliability: (value?.reliability ?? 'A') as CodeRating['reliability'],
-    maintainability: (value?.maintainability ?? 'A') as CodeRating['maintainability'], techDebtMinutes: value?.tech_debt_minutes ?? 0,
+    security: (value?.security ?? '?') as CodeRating['security'], reliability: (value?.reliability ?? '?') as CodeRating['reliability'],
+    maintainability: (value?.maintainability ?? '?') as CodeRating['maintainability'], techDebtMinutes: value?.tech_debt_minutes ?? 0,
     debtRatioPct: value?.debt_ratio_pct ?? 0, linesOfCode: value?.lines_of_code ?? 0,
   })
   return {
     id: r.id ?? '', createdAt: r.created_at ?? '', sourceRef: r.source_ref ?? '', sourceCommit: r.source_commit ?? '',
     gate: { passed: r.gate?.passed ?? false, results: (r.gate?.results ?? []).map((result: any) => ({ condition: { metric: result.metric ?? '', op: result.op ?? '', threshold: result.threshold ?? 0 }, actual: result.actual ?? 0, passed: result.passed ?? false })) },
-    issues: counts(r.issues), newCode: { previousId: r.new_code?.previous_id ?? '', counts: counts(r.new_code?.counts), rating: rating(r.new_code?.rating) },
+    gateInfo: { key: r.gate_info?.key ?? '', name: r.gate_info?.name ?? 'Quality gate', source: r.gate_info?.source ?? '' },
+    issues: counts(r.issues), newCode: { previousId: r.new_code?.previous_id ?? '', counts: counts(r.new_code?.counts), rating: { security: (r.new_code?.rating?.security ?? '?') as Grade, reliability: (r.new_code?.rating?.reliability ?? '?') as Grade, maintainability: r.new_code?.rating?.maintainability ? r.new_code.rating.maintainability as Grade : null } },
     delta: r.delta ? { issues: counts(r.delta.issues), measures: r.delta.measures ?? {}, ratings: r.delta.ratings ?? {} } : null, measures: r.measures ?? {},
     coverage: r.coverage ? { coveredLines: r.coverage.covered_lines ?? 0, totalLines: r.coverage.total_lines ?? 0 } : null,
     duplication: { blocks: [], duplicatedLines: r.duplication?.duplicated_lines ?? 0, totalLines: r.duplication?.total_lines ?? 0, files: r.duplication?.files ?? 0 }, rating: rating(r.rating),
@@ -871,9 +882,10 @@ export const api = {
     }
   },
 
-  latestProjectAnalysis: async (key: string): Promise<ScanResult | null> => {
+  latestProjectAnalysis: async (key: string): Promise<LatestProjectAnalysis | null> => {
     try {
-      return mapScanResult(await req(`/projects/${encodeURIComponent(key)}/analysis`))
+      const latest = await req(`/projects/${encodeURIComponent(key)}/analysis`)
+      return { analysis: mapProjectAnalysis(latest.analysis), result: mapScanResult(latest.result) }
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null
       throw e

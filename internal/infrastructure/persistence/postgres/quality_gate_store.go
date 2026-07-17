@@ -92,6 +92,32 @@ func (s *QualityGateStore) Delete(ctx context.Context, tenantID shared.ID, key s
 	return nil
 }
 
+func (s *QualityGateStore) DeleteIfUnassigned(ctx context.Context, tenantID shared.ID, key string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("quality gate delete transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quality_gates WHERE tenant_id=$1 AND key=$2 FOR UPDATE)`, tenantID.String(), key).Scan(&exists); err != nil {
+		return fmt.Errorf("lock quality gate: %w", err)
+	}
+	if !exists {
+		return shared.ErrNotFound
+	}
+	var assigned bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM projects WHERE tenant_id=$1 AND gate_id=$2)`, tenantID.String(), key).Scan(&assigned); err != nil {
+		return fmt.Errorf("check quality gate assignments: %w", err)
+	}
+	if assigned {
+		return shared.ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM quality_gates WHERE tenant_id=$1 AND key=$2`, tenantID.String(), key); err != nil {
+		return fmt.Errorf("delete quality gate: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 type qualityGateScanner interface{ Scan(...any) error }
 
 func scanQualityGate(row qualityGateScanner) (qualitygate.Gate, error) {

@@ -111,6 +111,18 @@ func (r *ProjectRepository) UpdateGate(_ context.Context, tenantID shared.ID, ke
 	return nil
 }
 
+func (r *ProjectRepository) CountByGate(_ context.Context, tenantID shared.ID, gateID string) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, p := range r.data {
+		if (tenantID.IsZero() || p.TenantID == tenantID) && p.GateID == gateID {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (r *ProjectRepository) DeleteByKey(_ context.Context, tenantID shared.ID, key string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
