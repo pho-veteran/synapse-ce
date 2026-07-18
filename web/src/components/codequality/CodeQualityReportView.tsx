@@ -1,5 +1,6 @@
 import { useMemo, type ReactNode } from 'react'
 import { Braces, Copy, FileCode2, Gauge, ShieldCheck, Wrench } from 'lucide-react'
+import { formatOverviewPercentage } from '../../lib/projectOverviewPresentation'
 import type { CodeQualityReport, Finding, Grade, LanguageInventory } from '../../lib/types'
 import { Card, Pill, SevBadge, cn } from '../ui'
 import { VirtualTable, type Column } from '../VirtualTable'
@@ -53,7 +54,15 @@ const languageCols: Column<LanguageInventory>[] = [
   { header: 'Functions', className: 'w-24 shrink-0 text-right', cell: (language) => <span className="font-mono tabular-nums text-mutedfg">{language.functionsKnown ? language.functions.toLocaleString() : 'n/a'}</span> },
 ]
 
-export function CodeQualityReportView({ report, empty }: { report?: CodeQualityReport; empty: ReactNode }) {
+export function CodeQualityReportView({
+  report,
+  empty,
+  landmarkIds,
+}: {
+  report?: CodeQualityReport
+  empty: ReactNode
+  landmarkIds?: { qualityRatings?: string; duplications?: string }
+}) {
   const findings = report?.findings ?? []
   const kindCounts = useMemo(() => {
     const counts: Record<string, number> = {}
@@ -68,6 +77,7 @@ export function CodeQualityReportView({ report, empty }: { report?: CodeQualityR
     { files: 0, code: 0 },
   )
   const dupDensity = report.duplication.totalLines > 0 ? (100 * report.duplication.duplicatedLines) / report.duplication.totalLines : 0
+  const dupDensityDisplay = formatOverviewPercentage(dupDensity)
   const debtH = Math.floor(report.rating.techDebtMinutes / 60)
   const debtM = report.rating.techDebtMinutes % 60
   const languages = [...report.inventory].sort((a, b) => b.codeLines - a.codeLines)
@@ -75,7 +85,7 @@ export function CodeQualityReportView({ report, empty }: { report?: CodeQualityR
 
   return (
     <div className="space-y-6">
-      <Card title="Quality ratings">
+      <Card title="Quality ratings" titleId={landmarkIds?.qualityRatings} titleTabIndex={landmarkIds?.qualityRatings ? -1 : undefined} titleClassName={landmarkIds?.qualityRatings ? 'scroll-mt-6 rounded-sm focus:outline-none focus:ring-2 focus:ring-brand/60' : undefined}>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <GradeCard label="Security" grade={report.rating.security} detail="Worst security issue severity" icon={ShieldCheck} />
           <GradeCard label="Reliability" grade={report.rating.reliability} detail="Worst reliability issue severity" icon={Gauge} />
@@ -95,7 +105,7 @@ export function CodeQualityReportView({ report, empty }: { report?: CodeQualityR
         <div className="grid grid-cols-1 gap-px bg-border sm:grid-cols-2 lg:grid-cols-4">
           <Metric label="Technical debt" value={`${debtH}h ${debtM}m`} hint={`${report.rating.debtRatioPct.toFixed(2)}% of estimated development cost`} icon={Wrench} />
           <Metric label="Code lines" value={total.code.toLocaleString()} hint={`${total.files.toLocaleString()} source files`} icon={FileCode2} />
-          <Metric label="Duplication" value={`${dupDensity.toFixed(1)}%`} hint={`${report.duplication.blocks.length.toLocaleString()} duplicate blocks`} icon={Copy} />
+          <Metric label="Duplication" value={dupDensityDisplay} hint={`${report.duplication.blocks.length.toLocaleString()} duplicate blocks`} icon={Copy} />
           <Metric label="Issues" value={findings.length.toLocaleString()} hint={`${kindCounts.quality ?? 0} quality · ${kindCounts.reliability ?? 0} reliability`} icon={Gauge} />
         </div>
       </Card>
@@ -117,11 +127,18 @@ export function CodeQualityReportView({ report, empty }: { report?: CodeQualityR
 
       <Card
         title="Duplicated blocks"
-        actions={<div className="flex items-center gap-2"><Pill>{dupDensity.toFixed(1)}% density</Pill>{report.duplication.blocks.length > duplicateBlocks.length && <span className="text-xs text-subtlefg">Showing {duplicateBlocks.length.toLocaleString()} of {report.duplication.blocks.length.toLocaleString()}</span>}</div>}
+        titleId={landmarkIds?.duplications}
+        titleTabIndex={landmarkIds?.duplications ? -1 : undefined}
+        titleClassName={landmarkIds?.duplications ? 'scroll-mt-6 rounded-sm focus:outline-none focus:ring-2 focus:ring-brand/60' : undefined}
+        actions={<div className="flex items-center gap-2"><Pill>{dupDensityDisplay} density</Pill>{report.duplication.blocks.length > duplicateBlocks.length && <span className="text-xs text-subtlefg">Showing {duplicateBlocks.length.toLocaleString()} of {report.duplication.blocks.length.toLocaleString()}</span>}</div>}
         bodyClass={duplicateBlocks.length === 0 ? undefined : 'p-0'}
       >
         {duplicateBlocks.length === 0 ? (
-          <p className="text-sm text-mutedfg">No duplicated code blocks were detected.</p>
+          <p className="text-sm text-mutedfg">
+            {report.duplication.duplicatedLines > 0
+              ? `Duplication was measured at ${dupDensityDisplay}, but block-level locations are unavailable for this analysis.`
+              : 'No duplicated blocks were detected.'}
+          </p>
         ) : (
           <ol className="max-h-[32rem] divide-y divide-border overflow-y-auto overscroll-contain">
             {duplicateBlocks.map((block, index) => (
