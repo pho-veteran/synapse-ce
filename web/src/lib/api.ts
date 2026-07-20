@@ -1369,10 +1369,10 @@ export const api = {
     })
   },
 
-  startScan: async (engagementId: string, target: string, kind: string, ref = '', mode = 'full'): Promise<ScanJob> => {
+  startScan: async (engagementId: string, target: string, kind: string, ref = '', mode = 'full', codeQuality = false): Promise<ScanJob> => {
     const r = await req('/sca/scans', {
       method: 'POST',
-      body: JSON.stringify({ engagement_id: engagementId, target, kind, ref, mode }),
+      body: JSON.stringify({ engagement_id: engagementId, target, kind, ref, mode, code_quality: codeQuality }),
     })
     return mapScanJob(r)
   },
