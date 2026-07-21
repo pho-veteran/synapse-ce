@@ -237,7 +237,7 @@ func TestCodeQualityFindingsPersistWithScan(t *testing.T) {
 	quality := &countingCodeQuality{report: codequality.Report{Findings: []finding.Finding{{
 		Title: "High complexity (internal/handler.go:42)", Description: "Split this function.", Severity: shared.SeverityMedium,
 		CWE: "CWE-1120", Sources: []string{"synapse-codeanalysis"}, Class: finding.ClassFirstParty,
-		Status: finding.StatusOpen, Kind: finding.KindQuality, RuleKey: "quality-high-complexity", DedupKey: "quality:quality-high-complexity:internal/handler.go:42",
+		Status: finding.StatusOpen, Kind: finding.KindQuality, RuleKey: "quality-high-complexity", DedupKey: "cq:quality:quality-high-complexity:internal/handler.go:42",
 	}}}}
 	svc := NewService(
 		&fakeEngRepo{eng: engagementWithScope(t, "myrepo")}, findings, nil, results, nil, runs, evidenceService, fakeIDs{},

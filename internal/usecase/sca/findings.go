@@ -427,10 +427,10 @@ func buildCodeQualityFindings(engagementID shared.ID, items []finding.Finding, n
 
 func codeQualityFile(dedupKey string) string {
 	parts := strings.Split(dedupKey, ":")
-	if len(parts) < 4 {
+	if len(parts) < 5 || parts[0] != "cq" {
 		return ""
 	}
-	return strings.Join(parts[2:len(parts)-1], ":")
+	return strings.Join(parts[3:len(parts)-1], ":")
 }
 
 // findingID is a stable id derived from the engagement + dedup key, so the same

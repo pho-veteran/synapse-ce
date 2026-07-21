@@ -1070,9 +1070,8 @@ export const api = {
     }
   },
 
-  // the engagement's code-quality report (inventory + findings + duplication + A-E ratings). Computed
-  // over an in-scope local source directory; an engagement without one returns available=false. 404 (the
-  // route is not registered when code quality is disabled) → also available=false.
+  // The latest stored code-quality report (inventory + findings + duplication + A-E ratings). A missing
+  // opted-in scan returns available=false; 404 remains unavailable for an absent engagement or older server.
   codeQuality: async (engagementId: string): Promise<CodeQualityView> => {
     let r: any
     try {

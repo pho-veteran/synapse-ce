@@ -475,8 +475,6 @@ function ExportButtons({ engagementId, scan, onChanged }: { engagementId: string
 
 // Mirrors the report builder's canonical sections (internal/usecase/report); keys +
 // order must match so the customer deliverable renders predictably.
-// Mirrors the report builder's canonical sections (internal/usecase/report); keys +
-// order must match so the customer deliverable renders predictably.
 const REPORT_SECTIONS: { key: string; label: string }[] = [
   { key: 'engagement', label: 'Engagement summary' },
   { key: 'scope', label: 'Scope statement' },
@@ -967,7 +965,12 @@ function ScanPanel({
         <SegmentedScanMode value={mode} onChange={setMode} />
         {!usingImportedSBOM && (
           <label className="flex h-10 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-border bg-elevated px-3 text-sm text-mutedfg hover:text-foreground">
-            <input type="checkbox" checked={codeQuality} onChange={(e) => setCodeQuality(e.target.checked)} className="size-4 accent-brand" />
+            <input
+              type="checkbox"
+              checked={codeQuality}
+              onChange={(e) => setCodeQuality(e.target.checked)}
+              className="size-4 accent-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+            />
             Code quality
           </label>
         )}

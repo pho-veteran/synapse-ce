@@ -1,24 +1,14 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/KKloudTarus/synapse-ce/internal/domain/shared"
 	"github.com/KKloudTarus/synapse-ce/internal/usecase/codequality"
 )
-
-// codeQualityService is the narrow slice of the code-quality use-case the HTTP layer needs: build the
-// dashboard report (inventory + findings + duplication + ratings) for a local source tree.
-// *codequality.Service satisfies it. Optional: nil => the code-quality route is not registered.
-type codeQualityService interface {
-	BuildReport(ctx context.Context, root string) (codequality.Report, error)
-}
-
-// SetCodeQuality wires the read-only code-quality dashboard endpoint.
-func (rt *Router) SetCodeQuality(s codeQualityService) { rt.codeQuality = s }
 
 // codeQualityReportView wraps the latest stored code-quality report with an availability flag.
 type codeQualityReportView struct {
@@ -54,7 +44,7 @@ func (rt *Router) codeQualityReport(w http.ResponseWriter, r *http.Request) {
 		CodeQuality *codequality.Report `json:"code_quality"`
 	}
 	if err := json.Unmarshal(data, &cached); err != nil {
-		writeError(w, rt.log, err)
+		writeError(w, rt.log, fmt.Errorf("decode cached scan result: %w", err))
 		return
 	}
 	if cached.CodeQuality == nil {

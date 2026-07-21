@@ -30,7 +30,7 @@ export function CodeQualityTab({ engagementId }: { engagementId: string }) {
           <EmptyState
             icon={Gauge}
             title="Code Quality unavailable"
-            hint={view.reason || 'Code Quality requires an in-scope local source directory; this engagement has none.'}
+            hint={view.reason || 'Run an Engagement scan with Code quality enabled to generate a stored report.'}
           />
         </Card>
       }
