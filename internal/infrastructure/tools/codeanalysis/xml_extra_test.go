@@ -3,6 +3,7 @@ package codeanalysis
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -344,4 +345,380 @@ func TestXMLDTD_OverflowDeclarations(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestXML_FallbackSuppression(t *testing.T) {
+	// Undeclared prefix is non-terminal, so malformed attribute on the same line should STILL be reported by fallback
+	xml := []byte("<root>\n<p:x> < </p:x>\n</root>")
+	res := scanXMLFile("test.xml", xml)
+
+	hasPrefix := false
+	hasFallback := false
+	for _, f := range res {
+		if f.RuleID == xmlUndeclaredPrefixRuleID {
+			hasPrefix = true
+		}
+		if f.RuleID == xmlNotWellFormedRuleID {
+			hasFallback = true
+		}
+	}
+	if !hasPrefix || !hasFallback {
+		t.Errorf("expected both undeclared prefix and not-well-formed fallback for non-terminal failure line, got: %+v", res)
+	}
+}
+
+func TestXML_FullPipelineSuppression(t *testing.T) {
+	tests := []struct {
+		name       string
+		xml        string
+		expected   []string
+		unexpected []string
+	}{
+		{
+			name:       "mismatched tag only",
+			xml:        `<root><item></root>`,
+			expected:   []string{xmlMismatchedTagRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "multiple root elements only",
+			xml:        `<first/><second/>`,
+			expected:   []string{xmlMultipleRootElementsRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "invalid character reference only",
+			xml:        `<root>&#0;</root>`,
+			expected:   []string{xmlInvalidCharacterReferenceRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "invalid character reference in attribute only",
+			xml:        `<root a="&#0;"/>`,
+			expected:   []string{xmlInvalidCharacterReferenceRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "malformed attribute + mismatched tag",
+			xml:        `<root bad=oops><a></b></root>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name: "invalid comment inside DTD",
+			xml: `<!DOCTYPE root [
+  <!-- invalid -- comment -->
+  <!ELEMENT root EMPTY>
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID, xmlInvalidCommentRuleID},
+			unexpected: []string{},
+		},
+		{
+			name: "DTD comment body ending in -",
+			xml: `<!DOCTYPE root [
+  <!-- invalid --->
+  <!ELEMENT root EMPTY>
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID, xmlInvalidCommentRuleID},
+			unexpected: []string{},
+		},
+		{
+			name: "DTD string literal containing comment",
+			xml: `<!DOCTYPE root [
+  <!ENTITY x "<!-- invalid -- comment -->">
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID},
+			unexpected: []string{xmlInvalidCommentRuleID},
+		},
+		{
+			name: "unterminated DTD comment",
+			xml: `<!DOCTYPE root [
+  <!-- invalid 
+  <!ELEMENT root EMPTY>
+]>
+<root/>`,
+			expected:   []string{xmlDoctypePresentRuleID, xmlInvalidCommentRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "closed invalid comment",
+			xml:        `<root><!-- invalid -- comment --></root>`,
+			expected:   []string{xmlInvalidCommentRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "comment ending in hyphen",
+			xml:        `<root><!-- invalid ---></root>`,
+			expected:   []string{xmlInvalidCommentRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "valid comment",
+			xml:        `<root><!-- valid comment --></root>`,
+			expected:   []string{},
+			unexpected: []string{xmlInvalidCommentRuleID, xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "clean mismatched tag",
+			xml:        `<a></b>`,
+			expected:   []string{xmlMismatchedTagRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "clean mismatched tag with whitespace",
+			xml:        `<a></b   >`,
+			expected:   []string{xmlMismatchedTagRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "malformed end tag attribute",
+			xml:        `<a></b bad=oops>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMismatchedTagRuleID},
+		},
+		{
+			name:       "malformed end tag token",
+			xml:        `<a></b x>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMismatchedTagRuleID},
+		},
+		{
+			name:       "nested malformed end tag",
+			xml:        `<root><a></wrong bad=oops></root>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMismatchedTagRuleID},
+		},
+		{
+			name:       "mismatched tag matching name but bad syntax",
+			xml:        `<a></a bad><b>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed start tag attribute missing quote",
+			xml:        `<a bad=oops>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed start tag unterminated quote",
+			xml:        `<a x="unterminated>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "multiple roots with malformed second root",
+			xml:        `<a/><b bad=oops/>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "char ref in malformed tag",
+			xml:        `<a x=&#0;>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "unclosed element exactly one",
+			xml:        `<root><a><b>`,
+			expected:   []string{xmlUnclosedElementRuleID},
+			unexpected: []string{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := scanXMLFile("test.xml", []byte(tc.xml))
+			var got []string
+			for _, f := range findings {
+				got = append(got, f.RuleID)
+			}
+			sort.Strings(got)
+			expected := make([]string, len(tc.expected))
+			copy(expected, tc.expected)
+			sort.Strings(expected)
+
+			if len(got) != len(expected) {
+				t.Errorf("expected %v, got %v\nfindings: %+v", expected, got, findings)
+			} else {
+				for i := range got {
+					if got[i] != expected[i] {
+						t.Errorf("expected %v, got %v\nfindings: %+v", expected, got, findings)
+						break
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestXML_TokenCompletenessMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		xml        string
+		expected   []string
+		unexpected []string
+	}{
+		{
+			name:       "unterminated start tag",
+			xml:        "<a x=\"v\"",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlUnclosedElementRuleID},
+		},
+		{
+			name:       "incomplete second root",
+			xml:        "<a /><b x=\"v\"",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMultipleRootElementsRuleID, xmlUnclosedElementRuleID},
+		},
+		{
+			name:       "malformed self-closing",
+			xml:        "<a / x>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlUnclosedElementRuleID},
+		},
+		{
+			name:       "invalid qname first root",
+			xml:        "<1a/><b/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMultipleRootElementsRuleID},
+		},
+		{
+			name:       "unterminated end tag",
+			xml:        "<a></b",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMismatchedTagRuleID},
+		},
+		{
+			name:       "empty end tag",
+			xml:        "<a></>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMismatchedTagRuleID},
+		},
+		{
+			name:       "invalid qname end tag",
+			xml:        "<a></1bad>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlMismatchedTagRuleID},
+		},
+		{
+			name:       "clean mismatched end tag with space",
+			xml:        "<a></b >",
+			expected:   []string{xmlMismatchedTagRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "unterminated CDATA",
+			xml:        "<root><![CDATA[unfinished",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlUnclosedElementRuleID},
+		},
+		{
+			name:       "unterminated PI",
+			xml:        "<root><?pi unfinished",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{xmlUnclosedElementRuleID},
+		},
+		{
+			name:       "unterminated DOCTYPE",
+			xml:        "<root><!DOCTYPE root [<!ELEMENT root EMPTY>",
+			expected:   []string{xmlDoctypePresentRuleID, xmlNotWellFormedRuleID},
+			unexpected: []string{xmlUnclosedElementRuleID},
+		},
+		{
+			name:       "invalid char ref before malformed attribute",
+			xml:        "<a x=\"&#0;\" y=oops>",
+			expected:   []string{xmlInvalidCharacterReferenceRuleID},
+			unexpected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:       "malformed first root + valid second root",
+			xml:        "<a@b/><d/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "invalid QName first root + valid second root",
+			xml:        "<a:b:c/><d/>",
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed attribute QName",
+			xml:        `<a x@y="1"/><b/>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "malformed token instead of attr val",
+			xml:        `<a x="<"/><b/>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		{
+			name:       "undefined entity in attr",
+			xml:        `<a x="&bogus;"/><b/>`,
+			expected:   []string{xmlNotWellFormedRuleID},
+			unexpected: []string{},
+		},
+		// ── Duplicate-attribute: barrier-aware ──────────────────────────
+		{
+			name:     "raw duplicate attribute in valid doc",
+			xml:      `<a x="1" x="2"/>`,
+			expected: []string{xmlDuplicateAttributeRuleID},
+		},
+		{
+			name:     "no duplicate when first root is malformed",
+			xml:      `<a@b/><d x="1" x="2"/>`,
+			expected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:     "no duplicate when attr parse fails first",
+			xml:      `<a bad=oops x="1" x="2"/>`,
+			expected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:     "expanded duplicate only when doc is valid",
+			xml:      `<a xmlns:p="u" xmlns:q="u" p:x="1" q:x="2"/>`,
+			expected: []string{xmlDuplicateAttributeRuleID},
+		},
+		// ── Barrier at exact offset (bogus entity) ───────────────────────
+		{
+			name:     "bogus entity + mismatched end tag: not-well-formed only",
+			xml:      `<a>&bogus;</b>`,
+			expected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:     "bogus entity + matching end tag: not-well-formed only, no unclosed",
+			xml:      `<a>&bogus;</a>`,
+			expected: []string{xmlNotWellFormedRuleID},
+		},
+		{
+			name:     "bogus entity + second root: not-well-formed only",
+			xml:      `<a>&bogus;</a><b/>`,
+			expected: []string{xmlNotWellFormedRuleID},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := scanXMLFile("test.xml", []byte(tt.xml))
+			findingIDs := []string{}
+			for _, f := range res {
+				findingIDs = append(findingIDs, f.RuleID)
+			}
+			sort.Strings(findingIDs)
+
+			expected := make([]string, len(tt.expected))
+			copy(expected, tt.expected)
+			sort.Strings(expected)
+
+			if !reflect.DeepEqual(findingIDs, expected) {
+				t.Errorf("expected exact findings %v, got %v\n", expected, findingIDs)
+			}
+		})
+	}
 }

@@ -15,16 +15,22 @@ import (
 )
 
 const (
-	xmlNotWellFormedRuleID          = "xml:not-well-formed"
-	xmlDuplicateAttributeRuleID     = "xml:duplicate-attribute"
-	xmlExternalEntityRuleID         = "xml:external-entity"
-	xmlExternalDTDRuleID            = "xml:external-dtd"
-	xmlExternalParamEntityRuleID    = "xml:external-parameter-entity"
-	xmlXIncludeRuleID               = "xml:xinclude"
-	xmlEntityExpansionRuleID        = "xml:entity-expansion"
-	xmlDoctypePresentRuleID         = "xml:doctype-present"
-	xmlExternalSchemaLocationRuleID = "xml:external-schema-location"
-	xmlHardcodedSecretRuleID        = "xml:hardcoded-secret" // #nosec G101 -- Stable rule identifier, not a credential.
+	xmlNotWellFormedRuleID             = "xml:not-well-formed"
+	xmlDuplicateAttributeRuleID        = "xml:duplicate-attribute"
+	xmlExternalEntityRuleID            = "xml:external-entity"
+	xmlExternalDTDRuleID               = "xml:external-dtd"
+	xmlExternalParamEntityRuleID       = "xml:external-parameter-entity"
+	xmlXIncludeRuleID                  = "xml:xinclude"
+	xmlEntityExpansionRuleID           = "xml:entity-expansion"
+	xmlDoctypePresentRuleID            = "xml:doctype-present"
+	xmlExternalSchemaLocationRuleID    = "xml:external-schema-location"
+	xmlHardcodedSecretRuleID           = "xml:hardcoded-secret" // #nosec G101 -- Stable rule identifier, not a credential.
+	xmlMismatchedTagRuleID             = "xml:mismatched-tag"
+	xmlUnclosedElementRuleID           = "xml:unclosed-element"
+	xmlMultipleRootElementsRuleID      = "xml:multiple-root-elements"
+	xmlUndeclaredPrefixRuleID          = "xml:undeclared-prefix"
+	xmlInvalidCharacterReferenceRuleID = "xml:invalid-character-reference"
+	xmlInvalidCommentRuleID            = "xml:invalid-comment"
 )
 
 type xmlRule struct {
@@ -129,6 +135,60 @@ func builtinXMLRules() []xmlRule {
 			ruleType: domainrule.TypeSecurityHotspot,
 			quality:  domainrule.QualitySecurity,
 		},
+		{
+			id:       xmlMismatchedTagRuleID,
+			title:    "Mismatched XML end tag",
+			kind:     kindReliability,
+			cwe:      "",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
+		},
+		{
+			id:       xmlUnclosedElementRuleID,
+			title:    "Unclosed XML element",
+			kind:     kindReliability,
+			cwe:      "",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
+		},
+		{
+			id:       xmlMultipleRootElementsRuleID,
+			title:    "Multiple XML root elements",
+			kind:     kindReliability,
+			cwe:      "",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
+		},
+		{
+			id:       xmlUndeclaredPrefixRuleID,
+			title:    "Undeclared XML namespace prefix",
+			kind:     kindReliability,
+			cwe:      "",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
+		},
+		{
+			id:       xmlInvalidCharacterReferenceRuleID,
+			title:    "Invalid XML character reference",
+			kind:     kindReliability,
+			cwe:      "",
+			severity: shared.SeverityMedium,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
+		},
+		{
+			id:       xmlInvalidCommentRuleID,
+			title:    "Invalid XML comment syntax",
+			kind:     kindReliability,
+			cwe:      "",
+			severity: shared.SeverityLow,
+			ruleType: domainrule.TypeBug,
+			quality:  domainrule.QualityReliability,
+		},
 	}
 }
 
@@ -161,15 +221,37 @@ func scanXMLFile(rel string, content []byte) []ports.CodeAnalysisRawFinding {
 	// 1. Lexical / DTD Scan
 	out = append(out, scanXMLDTD(rel, content)...)
 
-	// 2. Duplicate attributes scan
-	out = append(out, scanXMLDuplicateAttributes(rel, content)...)
-
-	// 3. XInclude, Schema Locations, Hardcoded Secrets
+	// 2. XInclude, Schema Locations, Hardcoded Secrets
 	out = append(out, scanXMLSecurityTokens(rel, content, declaredEntities)...)
 
-	// 4. Well-formedness check (with custom entity pre-registration)
-	if f, ok := scanXMLWellFormed(rel, content, declaredEntities); ok {
+	// 3. Well-formedness check (with custom entity pre-registration).
+	// This runs first to obtain parserFailureOffset, which is used as a
+	// hard barrier for all downstream scanners.
+	var parserFailureOffset int64 = -1
+	if f, offset, ok := scanXMLWellFormed(rel, content, declaredEntities); ok {
+		parserFailureOffset = offset
 		out = append(out, f)
+	}
+
+	// 4. Structural scan (comments, char refs, namespaces, structure, duplicate attrs).
+	// Raw duplicate-attribute detection has been moved into the structural scanner so
+	// it is subject to the same parserFailureOffset barrier.
+	structuralRes := scanXMLStructural(rel, content, parserFailureOffset)
+
+	// Suppress the generic parser failure when the structural scanner identified a
+	// more specific terminal rule at the same offset.
+	for _, sf := range structuralRes.Findings {
+		if structuralRes.Terminal != nil && sf.RuleID == structuralRes.Terminal.kind &&
+			parserFailureOffset >= structuralRes.Terminal.startOffset &&
+			parserFailureOffset <= structuralRes.Terminal.endOffset {
+			for i, gen := range out {
+				if gen.RuleID == xmlNotWellFormedRuleID {
+					out = append(out[:i], out[i+1:]...)
+					break
+				}
+			}
+		}
+		out = append(out, sf)
 	}
 
 	sortXMLFindings(out)
@@ -216,7 +298,7 @@ func xmlRawFinding(id string, rel string, line int, desc string) ports.CodeAnaly
 	}
 }
 
-func scanXMLWellFormed(rel string, content []byte, declaredEntities map[string]string) (ports.CodeAnalysisRawFinding, bool) {
+func scanXMLWellFormed(rel string, content []byte, declaredEntities map[string]string) (ports.CodeAnalysisRawFinding, int64, bool) {
 	dec := xml.NewDecoder(bytes.NewReader(content))
 	if len(declaredEntities) > 0 {
 		dec.Entity = make(map[string]string)
@@ -239,9 +321,9 @@ func scanXMLWellFormed(rel string, content []byte, declaredEntities map[string]s
 					rel,
 					1,
 					"XML parsing reached the end of the file without a document element.",
-				), true
+				), dec.InputOffset(), true
 			}
-			return ports.CodeAnalysisRawFinding{}, false
+			return ports.CodeAnalysisRawFinding{}, 0, false
 		}
 		if err != nil {
 			line, _ := dec.InputPos()
@@ -255,7 +337,7 @@ func scanXMLWellFormed(rel string, content []byte, declaredEntities map[string]s
 				rel,
 				line,
 				"XML parsing failed before the full document could be read: "+msg+".",
-			), true
+			), dec.InputOffset(), true
 		}
 		switch tok.(type) {
 		case xml.StartElement:
@@ -268,7 +350,7 @@ func scanXMLWellFormed(rel string, content []byte, declaredEntities map[string]s
 						rel,
 						line,
 						"XML parsing found more than one top-level document element.",
-					), true
+					), dec.InputOffset(), true
 				}
 			}
 			depth++
