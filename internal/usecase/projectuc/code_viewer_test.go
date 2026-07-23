@@ -185,6 +185,28 @@ func TestCodeFindingsConvertsMultilineColumnsToUTF16(t *testing.T) {
 	}
 }
 
+func TestReadCodeDiffServesPersistedUnifiedAndSplitData(t *testing.T) {
+	artifacts := &codeArtifactStub{data: []byte("new\n"), baseData: []byte("old\n")}
+	svc, analyses, p := newCodeService(t, artifacts)
+	saveCodeAnalysis(t, analyses, p, projectanalysis.Analysis{
+		Capabilities: projectanalysis.SourceCapabilities{
+			Source: projectanalysis.Capability{Available: true}, UnifiedDiff: projectanalysis.Capability{Available: true}, SplitDiff: projectanalysis.Capability{Available: true},
+		},
+		Comparison:     projectanalysis.Comparison{Available: true, BaseCommit: "base", MergeBase: "base", BaseManifest: projectanalysis.SourceManifest{Files: []projectanalysis.SourceFile{{Path: "main.go", Available: true}}}},
+		SourceManifest: projectanalysis.SourceManifest{Files: []projectanalysis.SourceFile{{Path: "main.go", Available: true}}},
+		FileChanges:    []projectanalysis.FileChange{{Status: projectanalysis.FileStatusModified, OldPath: "main.go", NewPath: "main.go", Hunks: []projectanalysis.DiffHunk{{Rows: []projectanalysis.DiffRow{{Kind: projectanalysis.DiffRowRemoved, OldLine: 1, Text: "old"}, {Kind: projectanalysis.DiffRowAdded, NewLine: 1, Text: "new"}}}}}},
+	})
+	for _, view := range []string{"unified", "split"} {
+		diff, _, err := svc.ReadCodeDiff(context.Background(), p.TenantID, p.Key, "analysis", "main.go", view, 3)
+		if err != nil || diff.View != view || len(diff.Change.Hunks) != 1 || len(diff.Change.Hunks[0].Rows) != 2 {
+			t.Fatalf("view=%s diff=%+v err=%v", view, diff, err)
+		}
+	}
+	if !artifacts.loaded || !artifacts.baseLoaded {
+		t.Fatalf("immutable artifacts not loaded: %+v", artifacts)
+	}
+}
+
 func TestReadCodeDiffReportsTruncatedBaseAsLimit(t *testing.T) {
 	artifacts := &codeArtifactStub{}
 	svc, analyses, p := newCodeService(t, artifacts)

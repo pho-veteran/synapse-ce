@@ -159,6 +159,23 @@ func TestProjectSourceCaptureDefaults(t *testing.T) {
 	}
 }
 
+func TestProjectAnalysisCompletionTimeout(t *testing.T) {
+	t.Setenv("SYNAPSE_SCAN_TIMEOUT", "2m")
+	t.Setenv("SYNAPSE_PROJECT_ANALYSIS_COMPLETION_TIMEOUT", "")
+	if got := Load().ProjectAnalysisCompletionTimeout; got != 2*time.Minute {
+		t.Fatalf("default completion timeout=%s, want 2m", got)
+	}
+	t.Setenv("SYNAPSE_PROJECT_ANALYSIS_COMPLETION_TIMEOUT", "45s")
+	if got := Load().ProjectAnalysisCompletionTimeout; got != 45*time.Second {
+		t.Fatalf("override completion timeout=%s, want 45s", got)
+	}
+	t.Setenv("SYNAPSE_SCAN_TIMEOUT", "0s")
+	t.Setenv("SYNAPSE_PROJECT_ANALYSIS_COMPLETION_TIMEOUT", "0s")
+	if got := Load().ProjectAnalysisCompletionTimeout; got != time.Minute {
+		t.Fatalf("disabled timeout fallback=%s, want 1m", got)
+	}
+}
+
 func TestLoadMaxWorkspaceBytes(t *testing.T) {
 	t.Setenv("SYNAPSE_MAX_WORKSPACE_BYTES", "")
 	if got := Load().MaxWorkspaceBytes; got != 2<<30 {

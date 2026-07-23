@@ -908,6 +908,9 @@ func main() {
 	router := httpapi.NewRouter(log, auth, engService, scaService, aupService, findingsService, exportService, reportService, evidenceService, reconService, logBroker, transferService, auditService, vexService, usersService, credentialsService)
 	projectService.SetScanner(scaService)
 	scaService.SetProjectAnalysisRecorder(projectService)
+	scaService.SetProjectAnalysisCompletionTimeout(cfg.ProjectAnalysisCompletionTimeout)
+	projectService.SetProjectAnalysisCompletionTimeout(cfg.ProjectAnalysisCompletionTimeout)
+	scaService.SetLogger(log)
 	sourceArtifacts := sourceartifact.New(cfg.ProjectSourceArtifactDir, cfg.ProjectSourceMaxFileBytes, cfg.ProjectSourceMaxFiles, cfg.ProjectSourceMaxBytes)
 	projectService.SetSourceArtifactStore(sourceArtifacts)
 	scaService.SetProjectSourceArtifactStore(sourceArtifacts)
@@ -916,7 +919,7 @@ func main() {
 			log.Warn("source artifact retention cleanup failed", "err", err)
 		}
 	}
-	log.Info("immutable project source capture ENABLED", "retention", cfg.ProjectSourceRetention, "dir", cfg.ProjectSourceArtifactDir)
+	log.Info("immutable project source capture ENABLED", "retention", cfg.ProjectSourceRetention)
 	router.SetProjects(projectService)
 	router.SetQualityGates(qualityGateService)
 	router.SetQualityProfiles(qualityProfileService)

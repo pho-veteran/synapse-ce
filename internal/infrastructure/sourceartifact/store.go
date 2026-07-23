@@ -62,7 +62,7 @@ func (s *Store) Capture(ctx context.Context, tenantID, projectID shared.ID, anal
 	unavailable := func(reason projectanalysis.UnavailableReason) projectanalysis.SourceCapture {
 		return projectanalysis.SourceCapture{Capabilities: unavailableCapabilities(reason)}
 	}
-	if strings.TrimSpace(s.root) == "" || tenantID.IsZero() || projectID.IsZero() || strings.TrimSpace(analysisID) == "" || strings.TrimSpace(sourceDir) == "" {
+	if err := s.validateAnalysisContext(projectID, analysisID); err != nil || strings.TrimSpace(sourceDir) == "" {
 		return unavailable(projectanalysis.UnavailableCaptureFailed), fmt.Errorf("%w: source capture context is required", shared.ErrValidation)
 	}
 	if err := ctx.Err(); err != nil {
@@ -180,6 +180,9 @@ func (s *Store) Load(ctx context.Context, tenantID, projectID shared.ID, analysi
 // It is independent from the head capture so deleted files remain renderable later.
 func (s *Store) CaptureBase(ctx context.Context, tenantID, projectID shared.ID, analysisID string, files map[string][]byte) (projectanalysis.SourceManifest, error) {
 	manifest := projectanalysis.SourceManifest{}
+	if err := s.validateAnalysisContext(projectID, analysisID); err != nil {
+		return manifest, err
+	}
 	if len(files) == 0 {
 		manifest.SetArtifactDigest()
 		return manifest, nil
@@ -254,6 +257,9 @@ func (s *Store) LoadBase(ctx context.Context, tenantID, projectID shared.ID, ana
 }
 
 func (s *Store) load(ctx context.Context, tenantID, projectID shared.ID, analysisID, side, path string) ([]byte, projectanalysis.SourceFile, error) {
+	if err := s.validateAnalysisContext(projectID, analysisID); err != nil {
+		return nil, projectanalysis.SourceFile{}, err
+	}
 	canonical, err := measure.CanonicalPath(path)
 	if err != nil || canonical == "" || canonical != path {
 		return nil, projectanalysis.SourceFile{}, fmt.Errorf("%w: source path is invalid", shared.ErrValidation)
@@ -262,6 +268,21 @@ func (s *Store) load(ctx context.Context, tenantID, projectID shared.ID, analysi
 	if side != "" {
 		root = filepath.Join(root, side)
 	}
+	if _, err := os.Stat(s.analysisDir(tenantID, projectID, analysisID)); err == nil {
+		return s.loadFrom(ctx, root, canonical)
+	} else if !os.IsNotExist(err) {
+		return nil, projectanalysis.SourceFile{}, projectanalysis.ErrSourceTransient
+	}
+	if legacy := s.legacyAnalysisDir(tenantID, projectID, analysisID); legacy != "" {
+		if side != "" {
+			legacy = filepath.Join(legacy, side)
+		}
+		return s.loadFrom(ctx, legacy, canonical)
+	}
+	return nil, projectanalysis.SourceFile{}, ErrNotRetained
+}
+
+func (s *Store) loadFrom(ctx context.Context, root, canonical string) ([]byte, projectanalysis.SourceFile, error) {
 	manifestData, err := os.ReadFile(filepath.Join(root, "manifest.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -307,21 +328,42 @@ func (s *Store) load(ctx context.Context, tenantID, projectID shared.ID, analysi
 }
 
 func (s *Store) DeleteAnalysis(_ context.Context, tenantID, projectID shared.ID, analysisID string) error {
-	if err := os.RemoveAll(s.analysisDir(tenantID, projectID, analysisID)); err != nil {
-		return fmt.Errorf("delete source analysis artifacts: %w", err)
+	if err := s.validateAnalysisContext(projectID, analysisID); err != nil {
+		return err
+	}
+	for _, root := range []string{s.analysisDir(tenantID, projectID, analysisID), s.legacyAnalysisDir(tenantID, projectID, analysisID)} {
+		if root != "" {
+			if err := os.RemoveAll(root); err != nil {
+				return fmt.Errorf("delete source analysis artifacts: %w", err)
+			}
+		}
 	}
 	return nil
 }
 
 func (s *Store) DeleteProject(_ context.Context, tenantID, projectID shared.ID) error {
-	if err := os.RemoveAll(filepath.Join(s.root, tenantID.String(), projectID.String())); err != nil {
-		return fmt.Errorf("delete project source artifacts: %w", err)
+	if err := s.validateProjectContext(projectID); err != nil {
+		return err
+	}
+	for _, root := range []string{s.projectDir(tenantID, projectID), s.legacyProjectDir(tenantID, projectID)} {
+		if root != "" {
+			if err := os.RemoveAll(root); err != nil {
+				return fmt.Errorf("delete project source artifacts: %w", err)
+			}
+		}
 	}
 	return nil
 }
 
 func (s *Store) CleanupExpired(_ context.Context, before time.Time) error {
-	tenants, err := os.ReadDir(s.root)
+	if err := s.cleanupExpiredAt(s.v2Root(), before); err != nil {
+		return err
+	}
+	return s.cleanupExpiredAt(s.root, before)
+}
+
+func (s *Store) cleanupExpiredAt(root string, before time.Time) error {
+	tenants, err := os.ReadDir(root)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -329,10 +371,10 @@ func (s *Store) CleanupExpired(_ context.Context, before time.Time) error {
 		return fmt.Errorf("list source artifact root: %w", err)
 	}
 	for _, tenant := range tenants {
-		if !tenant.IsDir() {
+		if !tenant.IsDir() || tenant.Name() == "v2" {
 			continue
 		}
-		projects, err := os.ReadDir(filepath.Join(s.root, tenant.Name()))
+		projects, err := os.ReadDir(filepath.Join(root, tenant.Name()))
 		if err != nil {
 			return fmt.Errorf("list project source artifacts: %w", err)
 		}
@@ -340,7 +382,7 @@ func (s *Store) CleanupExpired(_ context.Context, before time.Time) error {
 			if !project.IsDir() {
 				continue
 			}
-			analysisRoot := filepath.Join(s.root, tenant.Name(), project.Name())
+			analysisRoot := filepath.Join(root, tenant.Name(), project.Name())
 			analyses, err := os.ReadDir(analysisRoot)
 			if err != nil {
 				return fmt.Errorf("list analysis source artifacts: %w", err)
@@ -349,12 +391,18 @@ func (s *Store) CleanupExpired(_ context.Context, before time.Time) error {
 				if !analysis.IsDir() {
 					continue
 				}
+				analysisDir := filepath.Join(analysisRoot, analysis.Name())
+				if _, err := os.Stat(filepath.Join(analysisDir, "manifest.json")); os.IsNotExist(err) {
+					continue
+				} else if err != nil {
+					return fmt.Errorf("stat source artifact manifest: %w", err)
+				}
 				info, err := analysis.Info()
 				if err != nil {
 					return err
 				}
 				if info.ModTime().Before(before) {
-					if err := os.RemoveAll(filepath.Join(analysisRoot, analysis.Name())); err != nil {
+					if err := os.RemoveAll(analysisDir); err != nil {
 						return fmt.Errorf("remove expired source artifacts: %w", err)
 					}
 				}
@@ -364,8 +412,55 @@ func (s *Store) CleanupExpired(_ context.Context, before time.Time) error {
 	return nil
 }
 
+func (s *Store) validateProjectContext(projectID shared.ID) error {
+	if strings.TrimSpace(s.root) == "" || projectID.IsZero() {
+		return fmt.Errorf("%w: source capture context is required", shared.ErrValidation)
+	}
+	return nil
+}
+
+func (s *Store) validateAnalysisContext(projectID shared.ID, analysisID string) error {
+	if err := s.validateProjectContext(projectID); err != nil || strings.TrimSpace(analysisID) == "" {
+		return fmt.Errorf("%w: source capture context is required", shared.ErrValidation)
+	}
+	return nil
+}
+
+func (s *Store) v2Root() string { return filepath.Join(s.root, "v2") }
+
+func (s *Store) projectDir(tenantID, projectID shared.ID) string {
+	return filepath.Join(s.v2Root(), "t-"+hashID(tenantID.String()), "p-"+hashID(projectID.String()))
+}
+
 func (s *Store) analysisDir(tenantID, projectID shared.ID, analysisID string) string {
-	return filepath.Join(s.root, tenantID.String(), projectID.String(), analysisID)
+	return filepath.Join(s.projectDir(tenantID, projectID), "a-"+hashID(analysisID))
+}
+
+func (s *Store) legacyProjectDir(tenantID, projectID shared.ID) string {
+	if !safeLegacyComponent(tenantID.String()) || !safeLegacyComponent(projectID.String()) {
+		return ""
+	}
+	return filepath.Join(s.root, tenantID.String(), projectID.String())
+}
+
+func (s *Store) legacyAnalysisDir(tenantID, projectID shared.ID, analysisID string) string {
+	if !safeLegacyComponent(analysisID) {
+		return ""
+	}
+	root := s.legacyProjectDir(tenantID, projectID)
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, analysisID)
+}
+
+func hashID(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func safeLegacyComponent(value string) bool {
+	return strings.TrimSpace(value) != "" && value != "." && value != ".." && !strings.ContainsAny(value, `/\\`)
 }
 
 func availableCapabilities() projectanalysis.SourceCapabilities {

@@ -31,24 +31,25 @@ import (
 )
 
 type Service struct {
-	repo             ports.ProjectRepository
-	engagements      ports.EngagementRepository
-	clock            ports.Clock
-	ids              ports.IDGenerator
-	audit            ports.AuditLogger
-	scanner          *scauc.Service
-	archives         ports.ProjectArchiveStore
-	sourceArtifacts  ports.ProjectSourceArtifactStore
-	analyses         ports.ProjectAnalysisStore
-	hotspots         ports.ProjectHotspotStore
-	issues           ports.ProjectIssueStore
-	ruleCatalog      ports.RuleCatalog
-	findings         ports.FindingRepository
-	gates            *qualitygatesuc.Service
-	gateMutator      ports.QualityGateMutator
-	profiles         *qualityprofilesuc.Service
-	allowLocalSource bool
-	cursorSecret     []byte
+	repo                             ports.ProjectRepository
+	engagements                      ports.EngagementRepository
+	clock                            ports.Clock
+	ids                              ports.IDGenerator
+	audit                            ports.AuditLogger
+	scanner                          *scauc.Service
+	archives                         ports.ProjectArchiveStore
+	sourceArtifacts                  ports.ProjectSourceArtifactStore
+	analyses                         ports.ProjectAnalysisStore
+	hotspots                         ports.ProjectHotspotStore
+	issues                           ports.ProjectIssueStore
+	ruleCatalog                      ports.RuleCatalog
+	findings                         ports.FindingRepository
+	gates                            *qualitygatesuc.Service
+	gateMutator                      ports.QualityGateMutator
+	profiles                         *qualityprofilesuc.Service
+	allowLocalSource                 bool
+	projectAnalysisCompletionTimeout time.Duration
+	cursorSecret                     []byte
 }
 
 func NewService(repo ports.ProjectRepository, engagements ports.EngagementRepository, clock ports.Clock, ids ports.IDGenerator, audit ports.AuditLogger, allowLocalSource bool) *Service {
@@ -60,7 +61,12 @@ func (s *Service) SetArchiveStore(store ports.ProjectArchiveStore) { s.archives 
 func (s *Service) SetSourceArtifactStore(store ports.ProjectSourceArtifactStore) {
 	s.sourceArtifacts = store
 }
-func (s *Service) SetAnalysisStore(store ports.ProjectAnalysisStore)      { s.analyses = store }
+func (s *Service) SetAnalysisStore(store ports.ProjectAnalysisStore) { s.analyses = store }
+func (s *Service) SetProjectAnalysisCompletionTimeout(timeout time.Duration) {
+	if timeout > 0 {
+		s.projectAnalysisCompletionTimeout = timeout
+	}
+}
 func (s *Service) SetHotspotStore(store ports.ProjectHotspotStore)        { s.hotspots = store }
 func (s *Service) SetIssueStore(store ports.ProjectIssueStore)            { s.issues = store }
 func (s *Service) SetRuleCatalog(catalog ports.RuleCatalog)               { s.ruleCatalog = catalog }
@@ -68,6 +74,13 @@ func (s *Service) SetQualityProfiles(profiles *qualityprofilesuc.Service) { s.pr
 func (s *Service) SetFindingRepository(repo ports.FindingRepository)      { s.findings = repo }
 func (s *Service) SetQualityGates(gates *qualitygatesuc.Service)          { s.gates = gates }
 func (s *Service) SetQualityGateMutator(mutator ports.QualityGateMutator) { s.gateMutator = mutator }
+
+func (s *Service) completionTimeout() time.Duration {
+	if s.projectAnalysisCompletionTimeout > 0 {
+		return s.projectAnalysisCompletionTimeout
+	}
+	return time.Minute
+}
 
 // ValidateCursorSecret returns an error when key is nil or shorter than 32 bytes.
 func ValidateCursorSecret(key []byte) error {
@@ -307,21 +320,30 @@ func (s *Service) StartAnalysis(ctx context.Context, actor string, tenantID shar
 	if err != nil {
 		return ports.ScanJob{}, err
 	}
-	request := ports.AcquireRequest{Kind: p.SourceBinding.Kind, Value: p.SourceBinding.Value, Ref: p.SourceBinding.Ref}
-	if p.SourceBinding.Kind == project.SourceGit {
-		if p.SourceBinding.BaseRef != "" {
-			request.BaseRef = p.SourceBinding.BaseRef
-		} else if p.SourceBinding.DefaultBranch != "" && p.SourceBinding.Ref == p.SourceBinding.DefaultBranch && s.analyses != nil {
-			previous, _, err := s.analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
-			if err != nil {
-				return ports.ScanJob{}, fmt.Errorf("list comparison baseline: %w", err)
-			}
-			if len(previous) > 0 && previous[0].SourceRevision.Kind == projectanalysis.ScanKindGit && previous[0].SourceCommit != "" {
-				request.BaseRef, request.BaseCommit = p.SourceBinding.DefaultBranch, previous[0].SourceCommit
-			}
-		}
+	request, err := s.projectAcquireRequest(ctx, p)
+	if err != nil {
+		return ports.ScanJob{}, err
 	}
 	return s.scanner.StartScanWithOptions(ctx, actor, e.ID, request, scauc.ScanOptions{Mode: scauc.ScanModeFull, CodeQuality: true, ProjectAnalysis: true, LineCoverage: coverage, Gate: gate})
+}
+
+func (s *Service) projectAcquireRequest(ctx context.Context, p *project.Project) (ports.AcquireRequest, error) {
+	request := ports.AcquireRequest{Kind: p.SourceBinding.Kind, Value: p.SourceBinding.Value, Ref: p.SourceBinding.Ref}
+	if p.SourceBinding.Kind != project.SourceGit || p.SourceBinding.BaseRef != "" {
+		request.BaseRef = p.SourceBinding.BaseRef
+		return request, nil
+	}
+	if p.SourceBinding.Ref == "" || s.analyses == nil {
+		return request, nil
+	}
+	previous, _, err := s.analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
+	if err != nil {
+		return ports.AcquireRequest{}, fmt.Errorf("list comparison baseline: %w", err)
+	}
+	if len(previous) > 0 && previous[0].SourceRevision.Kind == projectanalysis.ScanKindGit && previous[0].SourceCommit != "" {
+		request.BaseRef, request.BaseCommit = p.SourceBinding.Ref, previous[0].SourceCommit
+	}
+	return request, nil
 }
 
 func (s *Service) AnalysisStatus(ctx context.Context, tenantID shared.ID, key string) (ports.ScanJob, error) {
@@ -381,7 +403,7 @@ func (s *Service) GetAnalysis(ctx context.Context, tenantID shared.ID, key, id s
 
 // RecordProjectAnalysis is called by SCA only after a successful pipeline and
 // before its ScanJob becomes succeeded. Non-Project scans intentionally no-op.
-func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared.ID, jobID string, completedAt time.Time, result *scauc.ScanResult) error {
+func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared.ID, jobID string, completedAt time.Time, result *scauc.ScanResult) (recordErr error) {
 	if result == nil {
 		return fmt.Errorf("project analysis result is required")
 	}
@@ -399,6 +421,17 @@ func (s *Service) RecordProjectAnalysis(ctx context.Context, engagementID shared
 	if err != nil {
 		return fmt.Errorf("get project for analysis: %w", err)
 	}
+	defer func() {
+		if recordErr == nil || s.sourceArtifacts == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), s.completionTimeout())
+		defer cancel()
+		if _, err := s.analyses.Get(cleanupCtx, p.TenantID, p.ID, shared.ID(jobID)); err == nil || !errors.Is(err, shared.ErrNotFound) {
+			return
+		}
+		_ = s.sourceArtifacts.DeleteAnalysis(cleanupCtx, p.TenantID, p.ID, jobID)
+	}()
 	previous, _, err := s.analyses.List(ctx, p.TenantID, p.ID, 1, time.Time{}, "")
 	if err != nil {
 		return fmt.Errorf("list project analyses: %w", err)

@@ -35,6 +35,31 @@ func (a *captureAudit) Record(_ context.Context, e ports.AuditEntry) error {
 	return nil
 }
 
+type cleanupArtifactStore struct {
+	tenant, project shared.ID
+	analysis        string
+	deleted         bool
+}
+
+func (*cleanupArtifactStore) Capture(context.Context, shared.ID, shared.ID, string, string) (projectanalysis.SourceCapture, error) {
+	return projectanalysis.SourceCapture{}, nil
+}
+func (*cleanupArtifactStore) CaptureBase(context.Context, shared.ID, shared.ID, string, map[string][]byte) (projectanalysis.SourceManifest, error) {
+	return projectanalysis.SourceManifest{}, nil
+}
+func (*cleanupArtifactStore) Load(context.Context, shared.ID, shared.ID, string, string) ([]byte, projectanalysis.SourceFile, error) {
+	return nil, projectanalysis.SourceFile{}, projectanalysis.ErrSourceNotRetained
+}
+func (*cleanupArtifactStore) LoadBase(context.Context, shared.ID, shared.ID, string, string) ([]byte, projectanalysis.SourceFile, error) {
+	return nil, projectanalysis.SourceFile{}, projectanalysis.ErrSourceNotRetained
+}
+func (s *cleanupArtifactStore) DeleteAnalysis(_ context.Context, tenantID, projectID shared.ID, analysisID string) error {
+	s.tenant, s.project, s.analysis, s.deleted = tenantID, projectID, analysisID, true
+	return nil
+}
+func (*cleanupArtifactStore) DeleteProject(context.Context, shared.ID, shared.ID) error { return nil }
+func (*cleanupArtifactStore) CleanupExpired(context.Context, time.Time) error           { return nil }
+
 type projectRuleCatalog struct{ rules map[rule.Key]rule.Rule }
 
 func (c projectRuleCatalog) List(context.Context) ([]rule.Rule, error) { return nil, nil }
@@ -44,6 +69,53 @@ func (c projectRuleCatalog) Get(_ context.Context, key rule.Key) (rule.Rule, err
 		return rule.Rule{}, shared.ErrNotFound
 	}
 	return item, nil
+}
+
+func TestProjectAcquireRequestUsesPriorGitCommit(t *testing.T) {
+	analyses := memory.NewProjectAnalysisStore()
+	svc := NewService(nil, nil, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	p := &project.Project{ID: "project", TenantID: "tenant", SourceBinding: project.SourceBinding{Kind: project.SourceGit, Value: "https://example.test/repo.git", Ref: "main"}}
+	if err := analyses.Save(context.Background(), projectanalysis.Analysis{ID: "previous", TenantID: "tenant", ProjectID: "project", CreatedAt: time.Unix(1, 0), SourceCommit: "immutable-commit", SourceRevision: projectanalysis.SourceRevision{Kind: projectanalysis.ScanKindGit}}); err != nil {
+		t.Fatal(err)
+	}
+	request, err := svc.projectAcquireRequest(context.Background(), p)
+	if err != nil || request.BaseRef != "main" || request.BaseCommit != "immutable-commit" {
+		t.Fatalf("request=%+v err=%v", request, err)
+	}
+}
+
+func TestProjectAcquireRequestPreservesExplicitBaseRef(t *testing.T) {
+	svc := NewService(nil, nil, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	request, err := svc.projectAcquireRequest(context.Background(), &project.Project{SourceBinding: project.SourceBinding{Kind: project.SourceGit, Value: "https://example.test/repo.git", Ref: "main", BaseRef: "release"}})
+	if err != nil || request.BaseRef != "release" || request.BaseCommit != "" {
+		t.Fatalf("request=%+v err=%v", request, err)
+	}
+}
+
+func TestRecordProjectAnalysisRemovesConfirmedOrphanArtifact(t *testing.T) {
+	ctx := context.Background()
+	projects := memory.NewProjectRepository()
+	engagements := memory.NewEngagementRepository()
+	analyses := memory.NewProjectAnalysisStore()
+	artifacts := &cleanupArtifactStore{}
+	svc := NewService(projects, engagements, fixedClock{}, fixedIDs{}, &captureAudit{}, true)
+	svc.SetAnalysisStore(analyses)
+	svc.SetSourceArtifactStore(artifacts)
+	p, err := svc.Create(ctx, CreateInput{TenantID: "tenant", CreatedBy: "alice", Name: "Project", Key: "project", SourceBinding: project.SourceBinding{Kind: project.SourceLocal, Value: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := engagements.GetByProjectID(ctx, p.TenantID, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RecordProjectAnalysis(ctx, e.ID, "job-1", time.Unix(1, 0), &scauc.ScanResult{}); err == nil {
+		t.Fatal("expected missing rule catalog error")
+	}
+	if !artifacts.deleted || artifacts.tenant != p.TenantID || artifacts.project != p.ID || artifacts.analysis != "job-1" {
+		t.Fatalf("cleanup=%+v, want tenant=%q project=%q analysis=job-1", artifacts, p.TenantID, p.ID)
+	}
 }
 
 func TestReconcileSourceCaptureKeepsOnlySnapshotFiles(t *testing.T) {

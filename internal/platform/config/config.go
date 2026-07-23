@@ -59,6 +59,9 @@ type Config struct {
 	NVDBudget time.Duration
 	// ScanTimeout bounds a single SCA scan; 0 disables.
 	ScanTimeout time.Duration
+	// ProjectAnalysisCompletionTimeout bounds immutable Project snapshot persistence
+	// after a scan completes. It must remain positive even when scan timeout is disabled.
+	ProjectAnalysisCompletionTimeout time.Duration
 	// FindingMinSeverity is the lowest vuln severity promoted to a finding.
 	FindingMinSeverity string
 	// IgnoreUnfixed, when true, does NOT promote vulnerabilities that have no available fix
@@ -330,29 +333,39 @@ type Config struct {
 
 // Load reads configuration from environment variables with sane defaults.
 func Load() Config {
+	scanTimeout := getduration("SYNAPSE_SCAN_TIMEOUT", 10*time.Minute)
+	completionTimeout := scanTimeout
+	if completionTimeout <= 0 {
+		completionTimeout = time.Minute
+	}
+	completionTimeout = getduration("SYNAPSE_PROJECT_ANALYSIS_COMPLETION_TIMEOUT", completionTimeout)
+	if completionTimeout <= 0 {
+		completionTimeout = time.Minute
+	}
 	return Config{
-		HTTPAddr:     getenv("SYNAPSE_HTTP_ADDR", ":8080"),
-		Environment:  normalizeEnv(getenv("SYNAPSE_ENV", "development")),
-		LogLevel:     getenv("SYNAPSE_LOG_LEVEL", "info"),
-		SingleTenant: getbool("SYNAPSE_SINGLE_TENANT", true),
-		APIToken:     getenv("SYNAPSE_API_TOKEN", ""),
-		AUPVersion:   getenv("SYNAPSE_AUP_VERSION", "1.0"),
-		AUPFile:      getenv("SYNAPSE_AUP_FILE", "data/aup-accepted.json"),
-		AuditFile:    getenv("SYNAPSE_AUDIT_FILE", "data/audit.jsonl"),
-		DBDSN:        getenv("SYNAPSE_DB_DSN", ""),
-		SyftBin:      getenv("SYNAPSE_SYFT_BIN", "syft"),
-		SBOMProducer: getenv("SYNAPSE_SBOM_PRODUCER", "syft"),
-		GrypeBin:     getenv("SYNAPSE_GRYPE_BIN", "grype"),
-		GrypeDBDir:   getenv("SYNAPSE_GRYPE_DB_DIR", ""),
-		OSVBaseURL:   getenv("SYNAPSE_OSV_URL", ""),
-		OSVBulkURL:   getenv("SYNAPSE_OSV_BULK_URL", ""),
-		DepsDevURL:   getenv("SYNAPSE_DEPSDEV_URL", ""),
-		KEVURL:       getenv("SYNAPSE_KEV_URL", ""),
-		EPSSURL:      getenv("SYNAPSE_EPSS_URL", ""),
-		NVDAPIURL:    getenv("SYNAPSE_NVD_API_URL", ""),
-		NVDAPIKey:    getenv("SYNAPSE_NVD_API_KEY", ""),
-		NVDBudget:    getduration("SYNAPSE_NVD_BUDGET", 20*time.Second),
-		ScanTimeout:  getduration("SYNAPSE_SCAN_TIMEOUT", 10*time.Minute),
+		HTTPAddr:                         getenv("SYNAPSE_HTTP_ADDR", ":8080"),
+		Environment:                      normalizeEnv(getenv("SYNAPSE_ENV", "development")),
+		LogLevel:                         getenv("SYNAPSE_LOG_LEVEL", "info"),
+		SingleTenant:                     getbool("SYNAPSE_SINGLE_TENANT", true),
+		APIToken:                         getenv("SYNAPSE_API_TOKEN", ""),
+		AUPVersion:                       getenv("SYNAPSE_AUP_VERSION", "1.0"),
+		AUPFile:                          getenv("SYNAPSE_AUP_FILE", "data/aup-accepted.json"),
+		AuditFile:                        getenv("SYNAPSE_AUDIT_FILE", "data/audit.jsonl"),
+		DBDSN:                            getenv("SYNAPSE_DB_DSN", ""),
+		SyftBin:                          getenv("SYNAPSE_SYFT_BIN", "syft"),
+		SBOMProducer:                     getenv("SYNAPSE_SBOM_PRODUCER", "syft"),
+		GrypeBin:                         getenv("SYNAPSE_GRYPE_BIN", "grype"),
+		GrypeDBDir:                       getenv("SYNAPSE_GRYPE_DB_DIR", ""),
+		OSVBaseURL:                       getenv("SYNAPSE_OSV_URL", ""),
+		OSVBulkURL:                       getenv("SYNAPSE_OSV_BULK_URL", ""),
+		DepsDevURL:                       getenv("SYNAPSE_DEPSDEV_URL", ""),
+		KEVURL:                           getenv("SYNAPSE_KEV_URL", ""),
+		EPSSURL:                          getenv("SYNAPSE_EPSS_URL", ""),
+		NVDAPIURL:                        getenv("SYNAPSE_NVD_API_URL", ""),
+		NVDAPIKey:                        getenv("SYNAPSE_NVD_API_KEY", ""),
+		NVDBudget:                        getduration("SYNAPSE_NVD_BUDGET", 20*time.Second),
+		ScanTimeout:                      scanTimeout,
+		ProjectAnalysisCompletionTimeout: completionTimeout,
 		// Promote EVERY detected vulnerability by default (info = lowest rank), matching
 		// Grype/Trivy/OSV-Scanner – a higher floor silently hides detected vulns and reads as
 		// "missing vulns". Prioritization is done by risk priority (KEV→EPSS×CVSS), not by

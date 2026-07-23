@@ -1149,6 +1149,7 @@ func run(path string, failOn shared.Severity, mode, priority string, ignoreUnfix
 		detectionSources,
 		risk.New(cfg.KEVURL, cfg.EPSSURL, nil), license.New(), licensemeta.NewChain(licensemeta.NewOSMetadata(), licensemeta.New(cfg.DepsDevURL, nil), licensemeta.NewPyPI("", nil)),
 	)
+	sca.SetProjectAnalysisCompletionTimeout(cfg.ProjectAnalysisCompletionTimeout)
 	sca.SetGateDecoder(qualityprofile.LoadGateBytes)
 	sca.SetSBOMEnricher(manifest.New())
 	sca.SetArtifactCataloger(msi.New()) // recover Windows Installer (.msi) product identity into the SBOM
